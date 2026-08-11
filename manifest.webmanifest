@@ -1,0 +1,15 @@
+{
+  "name": "Pilote — vos finances",
+  "short_name": "Pilote",
+  "description": "Cockpit financier personnel. 100 % local et privé.",
+  "start_url": ".",
+  "scope": ".",
+  "display": "standalone",
+  "background_color": "#0E1420",
+  "theme_color": "#0E1420",
+  "lang": "fr",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}

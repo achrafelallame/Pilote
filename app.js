@@ -175,6 +175,44 @@ function linProj(ys, pas){
   return my + b*((n-1+pas)-mx);
 }
 
+
+/* ===== Anti-double comptage : appariement des transferts =====
+   Un transfert reconnu (ex. PAYMENT RECEIVED côté carte) cherche son miroir sur un autre
+   compte : même montant (±0,01 $), ±5 jours. Le miroir est reclassé Transfert lui aussi. */
+function apparierTransferts(){
+  const utilises = new Set();
+  let n = 0;
+  for (const tr of S.tx.filter(t=>t.type==="Transfert")){
+    for (const t of S.tx){
+      if (t.type==="Transfert" || t.manuel || utilises.has(t.id)) continue;
+      if (t.source === tr.source) continue;
+      if (Math.abs(t.montant - tr.montant) > 0.01) continue;
+      if (Math.abs(new Date(t.date) - new Date(tr.date)) / 86400000 > 5) continue;
+      t.type = "Transfert"; t.cat = "Paiement carte"; t.apparie = true;
+      utilises.add(t.id); DB.put("tx", t); n++;
+      break;
+    }
+  }
+  return n;
+}
+const transferts = m => txM(m).filter(t=>t.type==="Transfert");
+
+/* ===== Faits saillants : variations significatives par catégorie ===== */
+function faitsSaillants(m){
+  const ms = months(), out = [];
+  const hist = ms.filter(x=>x<m).slice(-6);
+  if (!hist.length) return out;
+  for (const c of cats()){
+    const cur = depCat(m,c), ref = avg(hist.map(x=>depCat(x,c)));
+    if (ref===0 && cur===0) continue;
+    const d = cur-ref, p = ref>0 ? d/ref : 1;
+    if (Math.abs(d) >= 25 && Math.abs(p) >= .25)
+      out.push({c, d, p, txt: `<b>${c}</b> : ${d>0?"hausse":"baisse"} de ${fmt$.format(Math.abs(d))} (${fmtPct(Math.abs(p))}) vs vos 6 derniers mois`});
+  }
+  out.sort((a,b)=>Math.abs(b.d)-Math.abs(a.d));
+  return out.slice(0,5);
+}
+
 /* ================= NAVIGATION & FEUILLE ================= */
 function go(ecran){
   S.ecran = ecran;
@@ -233,42 +271,109 @@ function rMonth(){
   $("m-chips").innerHTML = ms.map(x=>`<button class="chip ${x===S.mois?"on":""}" data-m="${x}">${moisCourt(x)}</button>`).join("");
   document.querySelectorAll("#m-chips .chip").forEach(c=>c.onclick=()=>{S.mois=c.dataset.m; render();});
   if (!ms.length){ b.innerHTML = vide("Importez un relevé pour voir vos mois."); return; }
-  const m = S.mois;
-  const lesTx = txM(m).slice().sort((a,b)=>b.date.localeCompare(a.date));
-  const jours = {};
-  for (const t of lesTx) (jours[t.date] ||= []).push(t);
-  const i6 = ms.filter(x=>x<m).slice(-6);
-  const pm = prevMonth(m), an = (+m.slice(0,4)-1)+m.slice(4);
+  const m = S.mois, r = rev(m), d = dep(m), f = flux(m);
+  const pm = prevMonth(m), i6 = ms.filter(x=>x<m).slice(-6);
+  const an = (+m.slice(0,4)-1)+m.slice(4);
+  const anCour = ms.filter(x=>x.startsWith(m.slice(0,4)));
+  const trs = transferts(m), trTot = trs.reduce((a,t)=>a+t.montant,0);
+  const fs = faitsSaillants(m);
+
+  /* --- synthèse --- */
   b.innerHTML = `
-    <div class="card"><div class="chart-box"><canvas id="ch-cats"></canvas></div></div>
-    <div class="card">
-      <div class="cmp"><span>vs mois précédent</span>${deltaHTML(pm?compare(dep(m),dep(pm)):null,true)}</div>
-      <div class="cmp"><span>vs moyenne 6 mois</span>${deltaHTML(i6.length?compare(dep(m),avg(i6.map(dep))):null,true)}</div>
-      <div class="cmp"><span>vs ${moisLabel(an)}</span>${deltaHTML(ms.includes(an)?compare(dep(m),dep(an)):null,true)}</div>
+    <div class="card" style="text-align:center; padding:22px 16px">
+      <div class="kpi-label">Épargne du mois (flux net)</div>
+      <div style="font-size:2.2rem; font-weight:800" class="${f>=0?"pos":"neg"}">${f>=0?"+":"−"}${fmt$.format(Math.abs(f))}</div>
+      <div class="kpi-sub">${r>0?`Taux d'épargne : <b>${fmtPct(f/r)}</b>`:"Aucun revenu détecté ce mois-ci"}</div>
     </div>
+    <div class="grid2">
+      <div class="card"><div class="kpi-label">Revenus</div><div class="kpi-value">${fmt$.format(r)}</div>
+        <div class="kpi-sub">${deltaHTML(pm?compare(r,rev(pm)):null)} vs mois préc.</div></div>
+      <div class="card"><div class="kpi-label">Dépenses</div><div class="kpi-value">${fmt$.format(d)}</div>
+        <div class="kpi-sub">${deltaHTML(pm?compare(d,dep(pm)):null,true)} vs mois préc.</div></div>
+    </div>
+
+    <h2>Comparaisons — dépenses</h2>
+    <div class="card">
+      <div class="cmp"><span>vs mois précédent</span>${deltaHTML(pm?compare(d,dep(pm)):null,true)}</div>
+      <div class="cmp"><span>vs moyenne 6 derniers mois</span>${deltaHTML(i6.length?compare(d,avg(i6.map(dep))):null,true)}</div>
+      <div class="cmp"><span>vs ${moisLabel(an)}</span>${deltaHTML(ms.includes(an)?compare(d,dep(an)):null,true)}</div>
+      <div class="cmp"><span>vs moyenne ${m.slice(0,4)}</span>${deltaHTML(anCour.length>1?compare(d,avg(anCour.map(dep))):null,true)}</div>
+    </div>
+
+    ${fs.length?`<h2>À surveiller</h2><div class="card"><ul class="feed">${fs.map(x=>`<li>${x.d>0?"🔺":"🔻"} ${x.txt}</li>`).join("")}</ul></div>`:""}
+
+    <h2>Dépenses par catégorie</h2>
+    <div class="card" id="cat-tree"></div>
+
+    <div class="card row" id="tr-row" style="cursor:pointer">
+      <div class="d"><b>Transferts & paiements de cartes</b><div class="small muted">${trs.length} mouvements exclus des dépenses (anti-double comptage)</div></div>
+      <div class="sp"></div><div class="m muted">${fmt$.format(trTot)} ›</div>
+    </div>
+
+    <h2>Transactions</h2>
     <input class="search" id="tx-search" placeholder="Rechercher une transaction…">
     <div id="tx-list"></div>`;
+
+  /* --- catégories repliables (catégorie → commerçants) --- */
+  const parCat = {};
+  for (const t of txM(m).filter(t=>t.type==="Dépense")){
+    (parCat[t.cat] ||= {total:0, march:{}});
+    parCat[t.cat].total += t.montant;
+    const k = marchand(t.desc);
+    parCat[t.cat].march[k] = (parCat[t.cat].march[k]||0) + t.montant;
+  }
+  const catsTriees = Object.entries(parCat).sort((a,b)=>b[1].total-a[1].total);
+  const maxCat = catsTriees.length ? catsTriees[0][1].total : 1;
+  $("cat-tree").innerHTML = catsTriees.map(([c,v],i)=>`
+    <div class="cat-row" data-i="${i}" style="padding:10px 0; border-bottom:1px solid var(--border); cursor:pointer">
+      <div class="row">
+        <div class="ic" style="width:34px;height:34px;min-width:34px;border-radius:10px;background:var(--card2);display:grid;place-items:center">${EMOJI[c]||"❔"}</div>
+        <div class="d" style="flex:1"><b style="font-size:.92rem">${c}</b>
+          <div style="height:5px;border-radius:3px;background:var(--card2);margin-top:5px"><div style="height:5px;border-radius:3px;background:var(--pos);width:${Math.round(v.total/maxCat*100)}%"></div></div>
+        </div>
+        <div style="text-align:right"><b>${fmt$.format(v.total)}</b><div class="small muted">${fmtPct(d?v.total/d:0)} <span class="chev">›</span></div></div>
+      </div>
+      <div class="cat-detail" id="cat-d-${i}" style="display:none; padding:8px 0 2px 44px">
+        ${Object.entries(v.march).sort((a,b)=>b[1]-a[1]).map(([n,t])=>`
+          <div class="row" style="padding:5px 0"><span class="small">${n}</span><span class="sp"></span><span class="small"><b>${fmt$2.format(t)}</b></span></div>`).join("")}
+      </div>
+    </div>`).join("") || `<div class="empty small">Aucune dépense ce mois-ci.</div>`;
+  document.querySelectorAll(".cat-row").forEach(el=>el.onclick=()=>{
+    const det = $("cat-d-"+el.dataset.i);
+    const ouvert = det.style.display !== "none";
+    det.style.display = ouvert ? "none" : "block";
+    el.querySelector(".chev").textContent = ouvert ? "›" : "⌄";
+  });
+
+  /* --- feuille transferts --- */
+  $("tr-row").onclick = () => sheet(`
+    <h2 style="margin-top:0">Transferts & paiements — ${moisLabel(m)}</h2>
+    <p class="small muted">Ces mouvements sont exclus des dépenses et des revenus : c'est de l'argent qui circule entre vos comptes, pas de la consommation. Touchez-en un pour le reclasser si besoin.</p>
+    ${trs.map(t=>`<div class="tx" data-id="${t.id}"><div class="ic">${t.apparie?"🔗":"✔️"}</div>
+      <div class="d"><b>${marchand(t.desc)}</b><span>${t.date} · ${t.source}${t.apparie?" · apparié automatiquement":""}</span></div>
+      <div class="m muted">${fmt$2.format(t.montant)}</div></div>`).join("") || '<div class="empty small">Aucun transfert ce mois-ci.</div>'}
+    <button class="btn sec" onclick="closeSheet()">Fermer</button>`) ||
+    setTimeout(()=>document.querySelectorAll("#sheet-body .tx").forEach(el=>el.onclick=()=>{closeSheet(); ficheTx(el.dataset.id);}),50);
+
+  /* --- liste des transactions (dépenses & revenus) --- */
+  const lesTx = txM(m).filter(t=>t.type!=="Transfert").slice().sort((a,b)=>b.date.localeCompare(a.date));
+  const jours = {};
+  for (const t of lesTx) (jours[t.date] ||= []).push(t);
   const liste = filtre => {
-    $("tx-list").innerHTML = Object.entries(jours).map(([d, arr])=>{
+    $("tx-list").innerHTML = Object.entries(jours).map(([dd, arr])=>{
       const vis = arr.filter(t=>!filtre || t.desc.toLowerCase().includes(filtre) || t.cat.toLowerCase().includes(filtre));
       if (!vis.length) return "";
-      return `<div class="day-h">${+d.slice(8)} ${moisLabel(m)}</div>` + vis.map(t=>`
+      return `<div class="day-h">${+dd.slice(8)} ${moisLabel(m)}</div>` + vis.map(t=>`
         <div class="tx" data-id="${t.id}">
           <div class="ic">${EMOJI[t.cat]||"❔"}</div>
-          <div class="d"><b>${marchand(t.desc)}</b><span>${t.cat}${t.type!=="Dépense"?" · "+t.type:""}</span></div>
-          <div class="m ${t.type==="Revenu"?"pos":(t.type==="Transfert"?"muted":"")}">${t.type==="Revenu"?"+":""}${fmt$2.format(t.montant)}</div>
+          <div class="d"><b>${marchand(t.desc)}</b><span>${t.cat}${t.type==="Revenu"?" · Revenu":""}</span></div>
+          <div class="m ${t.type==="Revenu"?"pos":""}">${t.type==="Revenu"?"+":""}${fmt$2.format(t.montant)}</div>
         </div>`).join("");
     }).join("") || vide("Aucun résultat.");
-    document.querySelectorAll(".tx").forEach(el=>el.onclick=()=>ficheTx(el.dataset.id));
+    document.querySelectorAll("#tx-list .tx").forEach(el=>el.onclick=()=>ficheTx(el.dataset.id));
   };
   liste("");
   $("tx-search").oninput = e => liste(e.target.value.toLowerCase());
-  const cs = cats().map(c=>[c,depCat(m,c)]).filter(x=>x[1]>0).sort((a,b)=>b[1]-a[1]);
-  const pal = [css("--pos"),css("--blue"),css("--gold"),css("--neg"),"#B48EF5","#5FC9DE","#E58FB1","#9AB35C","#8FA0BC","#D98E5F","#6FD1B8","#C9C15E"];
-  mkChart("ch-cats", {type:"doughnut",
-    data:{labels:cs.map(x=>x[0]), datasets:[{data:cs.map(x=>x[1]), backgroundColor:cs.map((_,i)=>pal[i%pal.length]), borderWidth:0}]},
-    options:{responsive:true, maintainAspectRatio:false, cutout:"62%",
-      plugins:{legend:{position:"right", labels:{color:css("--muted"), boxWidth:9, boxHeight:9, usePointStyle:true, font:{size:11}}}}}});
 }
 
 function ficheTx(id){
@@ -315,41 +420,67 @@ function ficheTx(id){
 function rYear(){
   const ms = months(), b = $("year-body");
   if (!ms.length){ b.innerHTML = vide("Importez un relevé pour voir votre année."); return; }
+  const an = S.mois.slice(0,4);
+  const msAn = ms.filter(x=>x.startsWith(an));
   const fluxes = ms.map(flux), deps = ms.map(dep);
+  const cumDep = msAn.map(dep).reduce((a,v)=>a+v,0);
+  const cumRev = msAn.map(rev).reduce((a,v)=>a+v,0);
   const best = ms[fluxes.indexOf(Math.max(...fluxes))], worst = ms[fluxes.indexOf(Math.min(...fluxes))];
   const grosse = S.tx.filter(t=>t.type==="Dépense").sort((a,b)=>b.montant-a.montant)[0];
-  const atyp = ms.filter((x,i)=>deps.length>=3 && deps[i]>avg(deps)+1.5*std(deps));
-  const an = S.mois.slice(0,4), ytd = ms.filter(x=>x.startsWith(an)).map(dep).reduce((a,b)=>a+b,0);
   const restants = 12 - +S.mois.slice(5,7);
+  const moitie1 = msAn.slice(0, Math.ceil(msAn.length/2)).map(dep);
+  const moitie2 = msAn.slice(Math.ceil(msAn.length/2)).map(dep);
+  const tendance = msAn.length>=4 ? (avg(moitie2)>avg(moitie1)*1.05 ? "🔺 en hausse" : (avg(moitie2)<avg(moitie1)*0.95 ? "🔻 en baisse" : "→ stable")) : null;
   b.innerHTML = `
+    <h2>Cumul ${an}</h2>
+    <div class="grid2">
+      <div class="card"><div class="kpi-label">Revenus cumulés</div><div class="kpi-value">${fmt$.format(cumRev)}</div></div>
+      <div class="card"><div class="kpi-label">Dépenses cumulées</div><div class="kpi-value">${fmt$.format(cumDep)}</div></div>
+      <div class="card"><div class="kpi-label">Épargne cumulée</div><div class="kpi-value ${cumRev-cumDep>=0?"pos":"neg"}">${fmt$.format(cumRev-cumDep)}</div></div>
+      <div class="card"><div class="kpi-label">Tendance de consommation</div><div class="kpi-value" style="font-size:1.1rem">${tendance||"—"}</div>
+        <div class="kpi-sub">${tendance?"2e moitié vs 1re moitié de l'année":"Visible après 4 mois"}</div></div>
+    </div>
+    <h2>Épargne et cumul de l'année</h2>
+    <div class="card"><div class="chart-box"><canvas id="ch-flux"></canvas></div></div>
+    <div class="card"><div class="chart-box"><canvas id="ch-cumul"></canvas></div></div>
+    <h2>Revenus vs dépenses par mois</h2>
+    <div class="card"><div class="chart-box"><canvas id="ch-an"></canvas></div></div>
     <div class="grid2">
       <div class="badge"><span>Meilleur mois</span><b>${moisLabel(best)} · ${fmt$.format(Math.max(...fluxes))}</b></div>
       <div class="badge"><span>Pire mois</span><b>${moisLabel(worst)} · ${fmt$.format(Math.min(...fluxes))}</b></div>
       <div class="badge"><span>Plus forte dépense</span><b>${grosse?marchand(grosse.desc)+" · "+fmt$2.format(grosse.montant):"—"}</b></div>
-      <div class="badge"><span>Mois atypiques</span><b>${atyp.length?atyp.map(moisCourt).join(", "):"aucun"}</b></div>
+      <div class="badge"><span>Mois atypiques</span><b>${(deps.length>=3?ms.filter((x,i)=>deps[i]>avg(deps)+1.5*std(deps)):[]).map(moisCourt).join(", ")||"aucun"}</b></div>
     </div>
-    <h2>Revenus, dépenses, flux</h2>
-    <div class="card"><div class="chart-box"><canvas id="ch-an"></canvas></div></div>
     <h2>Valeur nette & dette</h2>
     <div class="card">${S.soldes.length?`<div class="chart-box"><canvas id="ch-vn"></canvas></div>`:`<div class="empty small">Saisissez vos soldes mensuels (Plus → Patrimoine) pour suivre valeur nette et dette.</div>`}</div>
-    <h2>Projections</h2>
+    <h2>Projections fin ${an}</h2>
     <div class="grid2">
-      <div class="card"><div class="kpi-label">Dépenses fin ${an}</div><div class="kpi-value">${fmt$.format(ytd+avg(deps)*restants)}</div></div>
-      <div class="card"><div class="kpi-label">Flux sur 12 mois</div><div class="kpi-value">${fmt$.format(avg(fluxes)*12)}</div></div>
+      <div class="card"><div class="kpi-label">Dépenses fin ${an}</div><div class="kpi-value">${fmt$.format(cumDep+avg(deps)*restants)}</div></div>
+      <div class="card"><div class="kpi-label">Épargne fin ${an}</div><div class="kpi-value">${fmt$.format((cumRev-cumDep)+avg(fluxes)*restants)}</div></div>
       <div class="card"><div class="kpi-label">Valeur nette +12 mois</div><div class="kpi-value">${S.soldes.length?fmt$.format(linProj(S.soldes.map(s=>s.vn),12)):"—"}</div></div>
       <div class="card"><div class="kpi-label">Dette +12 mois</div><div class="kpi-value">${S.soldes.length?fmt$.format(Math.max(0,linProj(S.soldes.map(s=>s.passifs),12))):"—"}</div></div>
     </div>
     <p class="small muted">${ms.length<3?"Estimations préliminaires — elles s'affineront avec l'historique.":"Basé sur vos tendances historiques."}</p>`;
+  const pos = css("--pos"), neg = css("--neg"), blue = css("--blue"), gold = css("--gold");
+  mkChart("ch-flux", {type:"bar",
+    data:{labels:ms.map(moisCourt), datasets:[{label:"Épargne (flux net) par mois", data:fluxes,
+      backgroundColor:fluxes.map(v=>v>=0?pos:neg), borderRadius:5, maxBarThickness:26}]},
+    options:baseOpts()});
+  let cd=0, cr=0;
+  mkChart("ch-cumul", {type:"line",
+    data:{labels:msAn.map(moisCourt), datasets:[
+      {label:"Revenus cumulés", data:msAn.map(x=>cr+=rev(x)), borderColor:blue, backgroundColor:blue+"22", fill:true, tension:.3, pointRadius:3},
+      {label:"Dépenses cumulées", data:msAn.map(x=>cd+=dep(x)), borderColor:neg, backgroundColor:neg+"22", fill:true, tension:.3, pointRadius:3}]},
+    options:baseOpts()});
   mkChart("ch-an", {type:"bar",
     data:{labels:ms.map(moisCourt), datasets:[
-      {label:"Revenus", data:ms.map(rev), backgroundColor:css("--blue"), borderRadius:5, maxBarThickness:22},
-      {label:"Dépenses", data:ms.map(dep), backgroundColor:css("--neg"), borderRadius:5, maxBarThickness:22},
-      {label:"Flux", data:fluxes, type:"line", borderColor:css("--pos"), backgroundColor:css("--pos"), tension:.35, pointRadius:3}]},
+      {label:"Revenus", data:ms.map(rev), backgroundColor:blue, borderRadius:5, maxBarThickness:22},
+      {label:"Dépenses", data:ms.map(dep), backgroundColor:neg, borderRadius:5, maxBarThickness:22}]},
     options:baseOpts()});
   if (S.soldes.length) mkChart("ch-vn", {type:"line",
-    data:{labels:S.soldes.map(s=>moisCourt(s.mois)), datasets:[
-      {label:"Valeur nette", data:S.soldes.map(s=>s.vn), borderColor:css("--pos"), backgroundColor:css("--pos")+"33", fill:true, tension:.35, pointRadius:3},
-      {label:"Dette", data:S.soldes.map(s=>s.passifs), borderColor:css("--gold"), tension:.35, pointRadius:3}]},
+    data:{labels:S.soldes.map(x=>moisCourt(x.mois)), datasets:[
+      {label:"Valeur nette", data:S.soldes.map(x=>x.vn), borderColor:pos, backgroundColor:pos+"33", fill:true, tension:.35, pointRadius:3},
+      {label:"Dette", data:S.soldes.map(x=>x.passifs), borderColor:gold, tension:.35, pointRadius:3}]},
     options:baseOpts()});
 }
 
@@ -441,7 +572,9 @@ async function importerPDF(files){
   $("imp-ok").onclick = async () => {
     for (const t of nouveaux) await DB.put("tx", t);
     S.tx = await DB.all("tx");
+    const nAp = apparierTransferts();
     closeSheet(); go("today");
+    if (nAp) toast(nAp + " paiement(s) de carte apparié(s) et exclu(s) des dépenses.");
     toast(`${nouveaux.length} transactions importées.`);
     setTimeout(()=>sheet(`<h2 style="margin-top:0">Sauvegarder maintenant ?</h2>
       <p class="small muted">Réflexe recommandé après chaque import : enregistrez le fichier dans Fichiers / iCloud Drive. C'est votre coffre-fort.</p>
@@ -489,7 +622,9 @@ async function restaurer(file){
     for (const t of data.tx) await DB.put("tx", t);
     for (const r of data.regles||[]) await DB.put("regles", r);
     for (const s of data.soldes||[]) await DB.put("soldes", s);
-    await chargerEtat(); go("today");
+    await chargerEtat();
+    apparierTransferts();
+    go("today");
     toast(`Restauré : ${S.tx.length} transactions, ${S.regles.length} règles.`);
   } catch(e){ toast("Restauration impossible : " + e.message); }
 }
@@ -528,6 +663,7 @@ window.closeSheet = closeSheet;
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(()=>{});
   await DB.open();
   await chargerEtat();
+  if (S.tx.length) apparierTransferts();   /* migration : appariement des données existantes */
   document.querySelectorAll("nav button").forEach(b=>b.onclick=()=>go(b.dataset.s));
   $("sheet-bg").onclick = closeSheet;
   $("btn-import").onclick = () => $("pdf-input").click();

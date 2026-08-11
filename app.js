@@ -86,10 +86,12 @@ function recategoriserTout(){
 /* ================= AGRÉGATS ================= */
 const months = () => [...new Set(S.tx.map(t=>t.mois))].sort();
 const txM = m => S.tx.filter(t=>t.mois===m);
-const dep = m => txM(m).filter(t=>t.type==="Dépense").reduce((a,t)=>a+t.montant,0);
-const rev = m => txM(m).filter(t=>t.type==="Revenu").reduce((a,t)=>a+t.montant,0);
+const remb = m => txM(m).filter(t=>t.type==="Remboursement").reduce((a,t)=>a+t.montant,0);
+const dep = m => txM(m).filter(t=>t.type==="Dépense").reduce((a,t)=>a+t.montant,0) - remb(m);   /* net des remboursements */
+const rev = m => txM(m).filter(t=>t.type==="Revenu").reduce((a,t)=>a+t.montant,0);              /* revenus réels seulement */
 const flux = m => rev(m)-dep(m);
-const depCat = (m,c) => txM(m).filter(t=>t.type==="Dépense"&&t.cat===c).reduce((a,t)=>a+t.montant,0);
+const depCat = (m,c) => txM(m).filter(t=>t.type==="Dépense"&&t.cat===c).reduce((a,t)=>a+t.montant,0)
+                      - txM(m).filter(t=>t.type==="Remboursement"&&t.cat===c).reduce((a,t)=>a+t.montant,0);
 const cats = () => [...new Set(S.tx.filter(t=>t.type==="Dépense").map(t=>t.cat))];
 const soldeOf = m => S.soldes.find(s=>s.mois===m) || null;
 const prevMonth = m => { const i=months().indexOf(m); return i>0 ? months()[i-1] : null; };
@@ -184,7 +186,7 @@ function apparierTransferts(){
   let n = 0;
   for (const tr of S.tx.filter(t=>t.type==="Transfert")){
     for (const t of S.tx){
-      if (t.type==="Transfert" || t.manuel || utilises.has(t.id)) continue;
+      if (t.type==="Transfert" || t.type==="Remboursement" || t.manuel || utilises.has(t.id)) continue;
       if (t.source === tr.source) continue;
       if (Math.abs(t.montant - tr.montant) > 0.01) continue;
       if (Math.abs(new Date(t.date) - new Date(tr.date)) / 86400000 > 5) continue;
@@ -196,6 +198,42 @@ function apparierTransferts(){
   return n;
 }
 const transferts = m => txM(m).filter(t=>t.type==="Transfert");
+
+
+/* ===== Classement rapide des non catégorisées ===== */
+function classerRapide(ids, idx=0){
+  if (idx >= ids.length){ closeSheet(); render(); toast("Tout est classé ✓"); return; }
+  const t = S.tx.find(x=>x.id===ids[idx]); if(!t){ classerRapide(ids, idx+1); return; }
+  const dispo = [...new Set([...Object.keys(EMOJI).filter(c=>!["Non catégorisé","Paiement carte","Transfert interne"].includes(c)), ...cats()])].sort();
+  const mot = marchand(t.desc).toUpperCase().split(" ").slice(0,2).join(" ");
+  sheet(`
+    <div class="small muted">${idx+1} / ${ids.length}</div>
+    <h2 style="margin-top:4px">${marchand(t.desc)}</h2>
+    <p class="small muted">${t.desc} · ${t.date} · ${fmt$2.format(t.montant)} (${t.typeAuto})</p>
+    <div class="chip-grid">${dispo.map(c=>`<button class="chip" data-c="${c}">${EMOJI[c]||""} ${c}</button>`).join("")}</div>
+    <label>Ou créez une catégorie</label><input id="qc-new" placeholder="ex. Maison et entretien">
+    <label class="row" style="margin-top:14px"><input type="checkbox" id="qc-rule" checked style="width:auto; margin:0">
+      <span class="small">Mémoriser : toujours classer « <b>${mot}</b> » ainsi</span></label>
+    <div class="grid2" style="margin-top:12px">
+      <button class="btn sec" id="qc-skip" style="margin:0">Passer</button>
+      <button class="btn sec" id="qc-stop" style="margin:0">Terminer</button>
+    </div>`);
+  const appliquer = async cat => {
+    t.cat = cat; t.type = t.typeAuto; t.manuel = true;
+    await DB.put("tx", t);
+    if ($("qc-rule").checked){
+      await DB.put("regles", {mot, cat, typeForce:null});
+      S.regles = await DB.all("regles");
+      await recategoriserTout();
+    }
+    toast(`${marchand(t.desc)} → ${cat}${$("qc-rule").checked?" · mémorisé":""}`);
+    classerRapide(ids, idx+1);
+  };
+  document.querySelectorAll("#sheet-body .chip").forEach(b=>b.onclick=()=>appliquer(b.dataset.c));
+  $("qc-new").onkeydown = e => { if (e.key==="Enter" && e.target.value.trim()) appliquer(e.target.value.trim()); };
+  $("qc-skip").onclick = () => classerRapide(ids, idx+1);
+  $("qc-stop").onclick = () => { closeSheet(); render(); };
+}
 
 /* ===== Faits saillants : variations significatives par catégorie ===== */
 function faitsSaillants(m){
@@ -276,6 +314,8 @@ function rMonth(){
   const an = (+m.slice(0,4)-1)+m.slice(4);
   const anCour = ms.filter(x=>x.startsWith(m.slice(0,4)));
   const trs = transferts(m), trTot = trs.reduce((a,t)=>a+t.montant,0);
+  const rb = remb(m), rembs = txM(m).filter(t=>t.type==="Remboursement");
+  const aClasser = txM(m).filter(t=>t.cat==="Non catégorisé" && t.type!=="Transfert");
   const fs = faitsSaillants(m);
 
   /* --- synthèse --- */
@@ -288,9 +328,15 @@ function rMonth(){
     <div class="grid2">
       <div class="card"><div class="kpi-label">Revenus</div><div class="kpi-value">${fmt$.format(r)}</div>
         <div class="kpi-sub">${deltaHTML(pm?compare(r,rev(pm)):null)} vs mois préc.</div></div>
-      <div class="card"><div class="kpi-label">Dépenses</div><div class="kpi-value">${fmt$.format(d)}</div>
-        <div class="kpi-sub">${deltaHTML(pm?compare(d,dep(pm)):null,true)} vs mois préc.</div></div>
+      <div class="card"><div class="kpi-label">Dépenses${rb>0?" nettes":""}</div><div class="kpi-value">${fmt$.format(d)}</div>
+        <div class="kpi-sub">${deltaHTML(pm?compare(d,dep(pm)):null,true)} vs mois préc.</div>
+        ${rb>0?`<div class="kpi-sub" style="color:var(--blue)">après ${fmt$.format(rb)} de remboursements reçus</div>`:""}</div>
     </div>
+
+    ${aClasser.length?`<div class="card row" id="nc-row" style="cursor:pointer; border-color:var(--gold)">
+      <div class="ic" style="width:34px;height:34px;min-width:34px;border-radius:10px;background:var(--card2);display:grid;place-items:center">❔</div>
+      <div class="d"><b>${aClasser.length} transaction${aClasser.length>1?"s":""} à classer</b><div class="small muted">Un toucher par transaction, l'app mémorise le commerçant.</div></div>
+      <div class="sp"></div><div class="m" style="color:var(--gold)">›</div></div>`:""}
 
     <h2>Comparaisons — dépenses</h2>
     <div class="card">
@@ -304,6 +350,10 @@ function rMonth(){
 
     <h2>Dépenses par catégorie</h2>
     <div class="card" id="cat-tree"></div>
+
+    ${rembs.length?`<div class="card row" id="rb-row" style="cursor:pointer">
+      <div class="d"><b>Dépenses partagées — remboursements</b><div class="small muted">${rembs.length} reçus, déduits des catégories qu'ils compensent</div></div>
+      <div class="sp"></div><div class="m" style="color:var(--blue)">−${fmt$.format(rb)} ›</div></div>`:""}
 
     <div class="card row" id="tr-row" style="cursor:pointer">
       <div class="d"><b>Transferts & paiements de cartes</b><div class="small muted">${trs.length} mouvements exclus des dépenses (anti-double comptage)</div></div>
@@ -322,6 +372,13 @@ function rMonth(){
     const k = marchand(t.desc);
     parCat[t.cat].march[k] = (parCat[t.cat].march[k]||0) + t.montant;
   }
+  /* remboursements : déduits de la catégorie qu'ils compensent, visibles dans le détail */
+  for (const t of rembs){
+    (parCat[t.cat] ||= {total:0, march:{}});
+    parCat[t.cat].total -= t.montant;
+    const k = "↩ Remboursement — " + marchand(t.desc);
+    parCat[t.cat].march[k] = (parCat[t.cat].march[k]||0) - t.montant;
+  }
   const catsTriees = Object.entries(parCat).sort((a,b)=>b[1].total-a[1].total);
   const maxCat = catsTriees.length ? catsTriees[0][1].total : 1;
   $("cat-tree").innerHTML = catsTriees.map(([c,v],i)=>`
@@ -329,7 +386,7 @@ function rMonth(){
       <div class="row">
         <div class="ic" style="width:34px;height:34px;min-width:34px;border-radius:10px;background:var(--card2);display:grid;place-items:center">${EMOJI[c]||"❔"}</div>
         <div class="d" style="flex:1"><b style="font-size:.92rem">${c}</b>
-          <div style="height:5px;border-radius:3px;background:var(--card2);margin-top:5px"><div style="height:5px;border-radius:3px;background:var(--pos);width:${Math.round(v.total/maxCat*100)}%"></div></div>
+          <div style="height:5px;border-radius:3px;background:var(--card2);margin-top:5px"><div style="height:5px;border-radius:3px;background:var(--pos);width:${Math.max(0,Math.round(v.total/maxCat*100))}%"></div></div>
         </div>
         <div style="text-align:right"><b>${fmt$.format(v.total)}</b><div class="small muted">${fmtPct(d?v.total/d:0)} <span class="chev">›</span></div></div>
       </div>
@@ -355,6 +412,17 @@ function rMonth(){
     <button class="btn sec" onclick="closeSheet()">Fermer</button>`) ||
     setTimeout(()=>document.querySelectorAll("#sheet-body .tx").forEach(el=>el.onclick=()=>{closeSheet(); ficheTx(el.dataset.id);}),50);
 
+  /* --- à classer & remboursements : interactions --- */
+  if (aClasser.length) $("nc-row").onclick = () => classerRapide(aClasser.map(t=>t.id));
+  if (rembs.length) $("rb-row").onclick = () => sheet(`
+    <h2 style="margin-top:0">Remboursements — ${moisLabel(m)}</h2>
+    <p class="small muted">Argent reçu pour des dépenses partagées. Chaque montant est déduit de la catégorie indiquée — ni revenu, ni transfert.</p>
+    ${rembs.map(t=>`<div class="tx" data-id="${t.id}"><div class="ic">🤝</div>
+      <div class="d"><b>${marchand(t.desc)}</b><span>${t.date} · déduit de « ${t.cat} »</span></div>
+      <div class="m" style="color:var(--blue)">−${fmt$2.format(t.montant)}</div></div>`).join("")}
+    <button class="btn sec" onclick="closeSheet()">Fermer</button>`) ||
+    setTimeout(()=>document.querySelectorAll("#sheet-body .tx").forEach(el=>el.onclick=()=>{closeSheet(); ficheTx(el.dataset.id);}),50);
+
   /* --- liste des transactions (dépenses & revenus) --- */
   const lesTx = txM(m).filter(t=>t.type!=="Transfert").slice().sort((a,b)=>b.date.localeCompare(a.date));
   const jours = {};
@@ -366,8 +434,8 @@ function rMonth(){
       return `<div class="day-h">${+dd.slice(8)} ${moisLabel(m)}</div>` + vis.map(t=>`
         <div class="tx" data-id="${t.id}">
           <div class="ic">${EMOJI[t.cat]||"❔"}</div>
-          <div class="d"><b>${marchand(t.desc)}</b><span>${t.cat}${t.type==="Revenu"?" · Revenu":""}</span></div>
-          <div class="m ${t.type==="Revenu"?"pos":""}">${t.type==="Revenu"?"+":""}${fmt$2.format(t.montant)}</div>
+          <div class="d"><b>${marchand(t.desc)}</b><span>${t.cat}${t.type==="Revenu"?" · Revenu":(t.type==="Remboursement"?" · Remboursement 🤝":"")}</span></div>
+          <div class="m ${t.type==="Revenu"?"pos":(t.type==="Remboursement"?"remb":"")}">${t.type!=="Dépense"?"+":""}${fmt$2.format(t.montant)}</div>
         </div>`).join("");
     }).join("") || vide("Aucun résultat.");
     document.querySelectorAll("#tx-list .tx").forEach(el=>el.onclick=()=>ficheTx(el.dataset.id));
@@ -384,14 +452,15 @@ function ficheTx(id){
     <p class="small muted">${t.desc}<br>${t.date} · ${t.source} · ${fmt$2.format(t.montant)}</p>
     <label>Catégorie</label>
     <select id="f-cat">${toutes.map(c=>`<option ${c===t.cat?"selected":""}>${c}</option>`).join("")}<option ${t.cat==="Non catégorisé"?"selected":""}>Non catégorisé</option></select>
-    <label>Type</label>
-    <select id="f-type">${["Dépense","Revenu","Transfert"].map(x=>`<option ${x===t.type?"selected":""}>${x}</option>`).join("")}</select>
+    <label>Type <span class="muted">(Remboursement = argent reçu qui réduit une dépense partagée, ex. la part du loyer de votre conjointe — déduit de la catégorie choisie, jamais compté comme revenu)</span></label>
+    <select id="f-type">${["Dépense","Revenu","Transfert","Remboursement"].map(x=>`<option ${x===t.type?"selected":""}>${x}</option>`).join("")}</select>
     <button class="btn" id="f-save">Enregistrer</button>
     <button class="btn sec" id="f-cancel">Annuler</button>`);
   $("f-cancel").onclick = closeSheet;
   $("f-save").onclick = async () => {
     const cat = $("f-cat").value, type = $("f-type").value;
-    const change = cat !== t.cat;
+    const change = cat !== t.cat || type !== t.type;
+    const typeForcePropose = (type === t.typeAuto) ? null : type;
     t.cat = cat; t.type = type; t.manuel = true;
     await DB.put("tx", t);
     closeSheet(); render();
@@ -401,13 +470,13 @@ function ficheTx(id){
         <h2 style="margin-top:0">Créer une règle ?</h2>
         <p class="small muted">Classer automatiquement toutes les transactions contenant ce mot — passées et futures.</p>
         <label>Mot-clé</label><input id="r-mot" value="${mot}">
-        <label>Catégorie</label><input id="r-cat" value="${cat}" readonly>
+        <label>Catégorie</label><input id="r-cat" value="${cat}" readonly>${typeForcePropose?`<label>Type mémorisé</label><input value="${typeForcePropose}" readonly>`:""}
         <button class="btn" id="r-oui">Oui, toujours classer ainsi</button>
         <button class="btn sec" id="r-non">Non, juste celle-ci</button>`), 250);
       setTimeout(()=>{
         $("r-non").onclick = closeSheet;
         $("r-oui").onclick = async () => {
-          await DB.put("regles", {mot:$("r-mot").value.trim(), cat, typeForce:null});
+          await DB.put("regles", {mot:$("r-mot").value.trim(), cat, typeForce:typeForcePropose});
           S.regles = await DB.all("regles");
           await recategoriserTout();
           closeSheet(); render(); toast("Règle créée et appliquée à tout l'historique.");
@@ -683,12 +752,14 @@ window.closeSheet = closeSheet;
     sheet(`<h2 style="margin-top:0">Nouvelle règle</h2>
       <label>Mot-clé (contenu dans la description)</label><input id="nr-mot" placeholder="ex. STARBUCKS">
       <label>Catégorie</label><input id="nr-cat" placeholder="ex. Restaurants">
+      <label>Type <span class="muted">(Auto = selon le sens de la transaction)</span></label>
+      <select id="nr-type"><option value="">Auto</option><option>Dépense</option><option>Revenu</option><option>Transfert</option><option>Remboursement</option></select>
       <button class="btn" id="nr-ok">Créer et appliquer</button>
       <button class="btn sec" onclick="closeSheet()">Annuler</button>`);
     $("nr-ok").onclick = async () => {
       const mot = $("nr-mot").value.trim(), cat = $("nr-cat").value.trim();
       if (!mot || !cat) return;
-      await DB.put("regles", {mot, cat, typeForce:null});
+      await DB.put("regles", {mot, cat, typeForce:$("nr-type").value||null});
       S.regles = await DB.all("regles"); await recategoriserTout();
       closeSheet(); render(); toast("Règle créée et appliquée.");
     };

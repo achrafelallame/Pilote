@@ -323,6 +323,34 @@ function render(){
   ({today:rToday, month:rMonth, year:rYear, merch:rMerch, more:rMore})[S.ecran]();
 }
 
+function blocEpargne(m){
+  /* dernier relevé de soldes disponible pour ce mois (ou le plus récent avant) */
+  const dispo = S.soldes.filter(s=>s.mois<=m);
+  const sEp = dispo.at(-1) || null;
+  const prec = dispo.at(-2) || null;
+  const an = m.slice(0,4);
+  const investiAn = S.tx.filter(t=>t.type==="Épargne" && t.mois<=m && t.mois.startsWith(an))
+                        .reduce((a,t)=>a+t.montant,0);
+  if (!sEp && !investiAn)
+    return `<div class="card"><p class="small muted">Suivez ici votre CELI, votre REER et votre épargne liquide, séparés de vos comptes courants. Saisie en 90 secondes — ou automatiquement via vos virements Questrade/Wealthsimple détectés dans les relevés.</p>
+      <button class="btn sec" id="btn-ep-saisir">Saisir mes soldes</button></div>`;
+  const tuile = (ic, cls, label, val, sub) => `<div class="card"><div class="kicon ${cls}">${ic}</div>
+    <div class="kpi-label">${label}</div><div class="kpi-value">${val}</div><div class="kpi-sub">${sub||""}</div></div>`;
+  const delta = (cur, prev) => prev==null ? "" : deltaHTML(compare(cur, prev));
+  let html = `<div class="grid2">`;
+  if (sEp){
+    html += tuile("🏦","kc-cyan","CELI", fmt$.format(sEp.celi), delta(sEp.celi, prec?.celi));
+    html += tuile("🌱","kc-blue","REER", fmt$.format(sEp.reer), delta(sEp.reer, prec?.reer));
+    html += tuile("💧","kc-amber","Épargne liquide", fmt$.format(sEp.liquide), delta(sEp.liquide, prec?.liquide));
+    html += tuile("◆","kc-pink","Total épargne", fmt$.format(sEp.celi+sEp.reer+sEp.liquide),
+      sEp.mois===m ? "" : `Soldes de ${moisLabel(sEp.mois)}`);
+  }
+  if (investiAn > 0)
+    html += tuile("📈","kc-blue","Investi en "+an, fmt$.format(investiAn), "Virements Questrade & cie détectés");
+  html += `</div><button class="btn sec" id="btn-ep-saisir">${sEp?"Mettre à jour mes soldes":"Saisir mes soldes"}</button>`;
+  return html;
+}
+
 function rToday(){
   const b = $("today-body"), ms = months();
   if (!ms.length){ b.innerHTML = vide(`Bienvenue dans votre cockpit financier.<br><br><b>Commencez par importer votre premier relevé PDF</b> dans l'onglet Plus.`,"👋"); return; }
@@ -346,8 +374,13 @@ function rToday(){
       <div class="card"><div class="kicon kc-amber">◆</div><div class="kpi-label">Valeur nette</div><div class="kpi-value">${so?fmt$.format(so.vn):"—"}</div>
         <div class="kpi-sub">${so?"":"À saisir dans Plus → Patrimoine"}</div></div>
     </div>
+    <h2>Épargne & investissements</h2>
+    <div id="epargne-bloc"></div>
+
     <h2>Vos habitudes, décodées</h2>
     <div class="card"><ul class="feed">${insights(m).map(x=>`<li>${x}</li>`).join("")}</ul></div>`;
+  $("epargne-bloc").innerHTML = blocEpargne(m);
+  const be = $("btn-ep-saisir"); if (be) be.onclick = feuilleSoldes;
 }
 
 function rMonth(){
@@ -852,6 +885,10 @@ window.closeSheet = closeSheet;
   await chargerEtat();
   if (S.tx.length) apparierTransferts();   /* migration : appariement des données existantes */
   document.querySelectorAll("nav button").forEach(b=>b.onclick=()=>go(b.dataset.s));
+  document.querySelectorAll(".fold-h").forEach(b=>b.onclick=()=>{
+    const el = $(b.dataset.fold); el.hidden = !el.hidden;
+    b.classList.toggle("ouvert", !el.hidden);
+  });
   $("sheet-bg").onclick = closeSheet;
   $("btn-import").onclick = () => $("pdf-input").click();
   $("pdf-input").onchange = e => { if(e.target.files.length) importerPDF([...e.target.files]); e.target.value=""; };

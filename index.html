@@ -7,7 +7,8 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="theme-color" content="#2563EB">
 <link rel="manifest" href="manifest.webmanifest">
-<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png?v=2">
+<meta name="apple-mobile-web-app-title" content="Finora">
 <title>Finora — vos finances</title>
 <style>
 :root[data-theme="light"]{
@@ -27,9 +28,9 @@ html,body{height:100%}
 body{background:var(--bg); color:var(--text);
   font-family:-apple-system, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
   font-variant-numeric:tabular-nums; line-height:1.45; overscroll-behavior:none;
-  padding-bottom:calc(80px + env(safe-area-inset-bottom));}
+  padding-bottom:calc(118px + env(safe-area-inset-bottom));}
 @media (prefers-reduced-motion: reduce){ *{animation:none!important; transition:none!important} }
-main{max-width:640px; margin:0 auto; padding:14px 16px 20px}
+main{max-width:640px; margin:0 auto; padding:calc(10px + env(safe-area-inset-top)) 16px 20px}
 .screen{display:none} .screen.on{display:block; animation:pop .28s ease}
 @keyframes pop{from{opacity:0; transform:translateY(6px)} to{opacity:1}}
 h1{font-size:1.55rem; font-weight:800; letter-spacing:-.5px; padding:12px 0 6px}
@@ -123,6 +124,12 @@ nav button.on .i{transform:translateY(-1px)}
 .empty .big{font-size:2.3rem; margin-bottom:8px}
 .pill{display:inline-block; background:var(--card2); border-radius:8px; padding:2px 8px; font-size:.74rem; color:var(--muted)}
 .chip-grid{display:flex; flex-wrap:wrap; gap:8px; margin-top:8px}
+.fold-h{display:flex; align-items:center; width:100%; background:none; border:none; color:var(--text);
+  padding:0; cursor:pointer; text-align:left}
+.fold-h h2{margin:0; flex:1}
+.fold-h .chev{color:var(--muted); font-size:1.2rem; transition:transform .2s}
+.fold-h.ouvert .chev{transform:rotate(90deg)}
+.fold-b{margin-top:12px}
 .toast{position:fixed; left:16px; right:16px; bottom:calc(92px + env(safe-area-inset-bottom)); background:var(--text);
   color:var(--bg); border-radius:15px; padding:13px 16px; z-index:30; font-size:.9rem; font-weight:600;
   opacity:0; transition:opacity .25s; pointer-events:none; box-shadow:0 12px 30px rgba(15,27,45,.3)}
@@ -175,14 +182,18 @@ body.dragging::after{content:"Déposez votre PDF ou sauvegarde"; position:fixed;
       <button class="btn sec" id="btn-soldes">Saisir mes soldes</button>
     </div>
     <div class="card">
-      <h2 style="margin-top:0">Mes catégories</h2>
-      <p class="small muted">Créez, renommez ou supprimez vos catégories — elles apparaissent partout dans l'app.</p>
-      <button class="btn sec" id="btn-cats">Gérer mes catégories</button>
+      <button class="fold-h" data-fold="fold-cats"><h2>Mes catégories</h2><span class="chev">›</span></button>
+      <div class="fold-b" id="fold-cats" hidden>
+        <p class="small muted">Créez, renommez ou supprimez vos catégories — elles apparaissent partout dans l'app.</p>
+        <button class="btn sec" id="btn-cats">Gérer mes catégories</button>
+      </div>
     </div>
     <div class="card">
-      <h2 style="margin-top:0">Règles de catégorisation</h2>
-      <div id="rules-list" class="feed"></div>
-      <button class="btn sec" id="btn-add-rule">Ajouter une règle</button>
+      <button class="fold-h" data-fold="fold-rules"><h2>Règles de catégorisation</h2><span class="chev">›</span></button>
+      <div class="fold-b" id="fold-rules" hidden>
+        <div id="rules-list" class="feed"></div>
+        <button class="btn sec" id="btn-add-rule">Ajouter une règle</button>
+      </div>
     </div>
     <div class="card">
       <h2 style="margin-top:0">Sauvegarde &amp; exports</h2>

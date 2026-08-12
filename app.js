@@ -329,18 +329,21 @@ function rToday(){
   const m = S.mois, sc = score(m), so = soldeOf(m);
   const deps6 = ms.filter(x=>x<m).slice(-6).map(dep);
   b.innerHTML = `
-    <div class="verdict">${verdict(m)}</div>
-    <div class="score-wrap">
-      <div class="ring" style="--p:${sc}"><div>${sc}</div></div>
-      <div class="small muted">Score financier /100 — épargne, endettement, stabilité, valeur nette, fonds d'urgence.</div>
+    <div class="card hero">
+      <div class="kpi-label">Votre situation</div>
+      <div class="verdict" style="margin-top:6px">${verdict(m)}</div>
+      <div class="score-wrap">
+        <div class="ring" style="--p:${sc}"><div>${sc}</div></div>
+        <div class="small muted">Score financier /100 — épargne, endettement, stabilité, valeur nette, fonds d'urgence.</div>
+      </div>
     </div>
     <h2>${moisLabel(m)}</h2>
     <div class="grid2">
-      <div class="card"><div class="kpi-label">Flux net</div><div class="kpi-value ${flux(m)>=0?"pos":"neg"}">${fmt$.format(flux(m))}</div></div>
-      <div class="card"><div class="kpi-label">Dépenses</div><div class="kpi-value">${fmt$.format(dep(m))}</div>
+      <div class="card"><div class="kicon kc-blue">〜</div><div class="kpi-label">Flux net</div><div class="kpi-value ${flux(m)>=0?"pos":"neg"}">${fmt$.format(flux(m))}</div></div>
+      <div class="card"><div class="kicon kc-pink">↑</div><div class="kpi-label">Dépenses</div><div class="kpi-value">${fmt$.format(dep(m))}</div>
         <div class="kpi-sub">${deltaHTML(deps6.length?compare(dep(m),avg(deps6)):null,true)} vs rythme</div></div>
-      <div class="card"><div class="kpi-label">Revenus</div><div class="kpi-value">${fmt$.format(rev(m))}</div></div>
-      <div class="card"><div class="kpi-label">Valeur nette</div><div class="kpi-value">${so?fmt$.format(so.vn):"—"}</div>
+      <div class="card"><div class="kicon kc-cyan">↓</div><div class="kpi-label">Revenus</div><div class="kpi-value">${fmt$.format(rev(m))}</div></div>
+      <div class="card"><div class="kicon kc-amber">◆</div><div class="kpi-label">Valeur nette</div><div class="kpi-value">${so?fmt$.format(so.vn):"—"}</div>
         <div class="kpi-sub">${so?"":"À saisir dans Plus → Patrimoine"}</div></div>
     </div>
     <h2>Vos habitudes, décodées</h2>
@@ -364,7 +367,7 @@ function rMonth(){
 
   /* --- synthèse --- */
   b.innerHTML = `
-    <div class="card" style="text-align:center; padding:22px 16px">
+    <div class="card hero" style="text-align:center; padding:24px 16px">
       <div class="kpi-label">Épargne du mois (flux net)</div>
       <div style="font-size:2.2rem; font-weight:800" class="${f>=0?"pos":"neg"}">${f>=0?"+":"−"}${fmt$.format(Math.abs(f))}</div>
       <div class="kpi-sub">${r>0?`Taux d'épargne : <b>${fmtPct(f/r)}</b>`:"Aucun revenu détecté ce mois-ci"}</div>
@@ -434,7 +437,7 @@ function rMonth(){
       <div class="row">
         <div class="ic" style="width:34px;height:34px;min-width:34px;border-radius:10px;background:var(--card2);display:grid;place-items:center">${emo(c)}</div>
         <div class="d" style="flex:1"><b style="font-size:.92rem">${c}</b>
-          <div style="height:5px;border-radius:3px;background:var(--card2);margin-top:5px"><div style="height:5px;border-radius:3px;background:var(--pos);width:${Math.max(0,Math.round(v.total/maxCat*100))}%"></div></div>
+          <div style="height:5px;border-radius:3px;background:var(--card2);margin-top:5px"><div style="height:5px;border-radius:3px;background:linear-gradient(90deg,#2563EB,#60A5FA);width:${Math.max(0,Math.round(v.total/maxCat*100))}%"></div></div>
         </div>
         <div style="text-align:right"><b>${fmt$.format(v.total)}</b><div class="small muted">${fmtPct(d?v.total/d:0)} <span class="chev">›</span></div></div>
       </div>
@@ -774,14 +777,14 @@ function feuilleSoldes(){
 
 /* ================= SAUVEGARDE / EXPORTS ================= */
 function sauvegarde(){
-  const data = {app:"Pilote", version:1, exporte:new Date().toISOString(), tx:S.tx, regles:S.regles, soldes:S.soldes};
-  download(`Pilote_sauvegarde_${new Date().toISOString().slice(0,10)}.json`, JSON.stringify(data), "application/json");
+  const data = {app:"Finora", version:1, exporte:new Date().toISOString(), tx:S.tx, regles:S.regles, soldes:S.soldes};
+  download(`Finora_sauvegarde_${new Date().toISOString().slice(0,10)}.json`, JSON.stringify(data), "application/json");
   toast("Sauvegarde générée — enregistrez-la dans Fichiers / iCloud.");
 }
 async function restaurer(file){
   try {
     const data = JSON.parse(await file.text());
-    if (data.app!=="Pilote" || !Array.isArray(data.tx)) throw new Error("format inattendu");
+    if (!["Finora","Pilote"].includes(data.app) || !Array.isArray(data.tx)) throw new Error("format inattendu");
     await DB.clear("tx"); await DB.clear("regles"); await DB.clear("soldes");
     for (const t of data.tx) await DB.put("tx", t);
     for (const r of data.regles||[]) await DB.put("regles", r);
@@ -796,7 +799,7 @@ function exportCSV(){
   const lignes = [["Date","Description","Montant","Type","Catégorie","Source","Mois"]];
   for (const t of S.tx.slice().sort((a,b)=>a.date.localeCompare(b.date)))
     lignes.push([t.date, t.desc.replace(/"/g,"'"), t.montant.toFixed(2), t.type, t.cat, t.source, t.mois]);
-  download("Pilote_Transactions.csv", "\ufeff"+lignes.map(l=>l.map(c=>`"${c}"`).join(";")).join("\n"), "text/csv");
+  download("Finora_Transactions.csv", "\ufeff"+lignes.map(l=>l.map(c=>`"${c}"`).join(";")).join("\n"), "text/csv");
 }
 function exportXLSX(){
   const wb = XLSX.utils.book_new();
@@ -807,7 +810,7 @@ function exportXLSX(){
     "Épargne liquide":s.liquide, "Solde AMEX":s.amex, "Autre carte":s.carte2, "Prêt auto":s.pret, "Autres dettes":s.autres,
     Actifs:s.actifs, Passifs:s.passifs, "Valeur nette":s.vn}))), "Soldes");
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(S.regles.map(r=>({"MotClé":r.mot, "Catégorie":r.cat, "TypeForcé":r.typeForce||""}))), "Règles");
-  XLSX.writeFile(wb, "Pilote_Export.xlsx");
+  XLSX.writeFile(wb, "Finora_Export.xlsx");
 }
 
 /* ================= DÉMARRAGE ================= */
@@ -858,10 +861,11 @@ window.closeSheet = closeSheet;
   $("restore-input").onchange = e => { if(e.target.files[0]) restaurer(e.target.files[0]); e.target.value=""; };
   $("btn-csv").onclick = exportCSV;
   $("btn-xlsx").onclick = exportXLSX;
+  const majBoutonTheme = () => { const b=$("btn-theme"); if(b) b.textContent = document.documentElement.dataset.theme==="dark" ? "☀️ Clair" : "🌙 Sombre"; };
   $("btn-theme").onclick = () => {
     const t = document.documentElement.dataset.theme==="dark"?"light":"dark";
     document.documentElement.dataset.theme = t;
-    DB.put("meta",{k:"theme",v:t}); render();
+    DB.put("meta",{k:"theme",v:t}); majBoutonTheme(); render();
   };
   $("btn-cats").onclick = gererCategories;
   $("btn-add-rule").onclick = () => {
@@ -892,5 +896,6 @@ window.closeSheet = closeSheet;
   });
   const th = (await DB.all("meta")).find(x=>x.k==="theme");
   if (th) document.documentElement.dataset.theme = th.v;
+  majBoutonTheme();
   go("today");
 })();

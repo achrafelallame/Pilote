@@ -37,12 +37,15 @@ const DB = { d:null,
 };
 
 /* ================= ÉTAT ================= */
-const S = { tx:[], regles:[], soldes:[], mois:null, ecran:"today", charts:{} };
+const S = { tx:[], regles:[], soldes:[], mois:null, ecran:"today", charts:{}, cats:[] };
 const ESSENTIEL = ["Épicerie","Logement","Transport","Télécom","Santé","Frais bancaires","Frais de carte","Assurances"];
 const DISCRET = ["Restaurants","Magasinage","Abonnements","Divertissement","Voyages"];
 const EMOJI = {"Épicerie":"🛒","Restaurants":"🍽️","Transport":"🚗","Télécom":"📱","Abonnements":"🔁","Santé":"🩺",
   "Magasinage":"🛍️","Logement":"🏠","Frais bancaires":"🏦","Frais de carte":"💳","Salaire":"💼","Virements reçus":"⬇️",
   "Virements Interac":"↔️","Virements internationaux":"🌍","Retraits":"💵","Paiement carte":"✔️","Transfert interne":"🔄","Non catégorisé":"❔"};
+function emo(c){ const f = S.cats.find(x=>x.n===c); return f ? f.e : (EMOJI[c]||"❔"); }
+function catNames(){ return [...new Set([...S.cats.map(x=>x.n), ...cats()])].filter(c=>c!=="Non catégorisé").sort(); }
+async function sauverCats(){ await DB.put("meta", {k:"cats", v:S.cats}); }
 const REGLES_DEFAUT = [
   ["METRO","Épicerie"],["COSTCO","Épicerie"],["LOBLAWS","Épicerie"],["MASSINE","Épicerie"],["Y.I.G","Épicerie"],
   ["IGA","Épicerie"],["FARM BOY","Épicerie"],["FOOD BASICS","Épicerie"],
@@ -61,20 +64,45 @@ const REGLES_DEFAUT = [
   ["SERVICE CHARGE","Frais bancaires"],["OVERDRAFT","Frais bancaires"],
   ["MEMBERSHIP FEE","Frais de carte"],
   ["YOUTH SERVICES","Salaire","Revenu"],
+  ["SERVICE CHARGE REWARDS","Frais bancaires","Remboursement"],
+  ["RECLAIM","Logement","Remboursement"],
+  ["SUZANNE","Logement",""],
+  ["INTISSAR","Logement","Remboursement"],
+  ["SUNLIFE","Santé","Remboursement"],
+  ["APPLE.COM","Abonnements",""],
+  ["QUESTRADE","Épargne investie","Épargne"],
+  ["WEALTHSIMPLE","Épargne investie","Épargne"],
+  ["FAIRSTONE","Remboursement de dettes",""],
+  ["CLUTCH","Véhicule",""],
   ["AMERICAN EXPRESS","Paiement carte","Transfert"],["PAYMENT RECEIVED","Paiement carte","Transfert"],
   ["PAYMENT THANK YOU","Paiement carte","Transfert"],["INTERNET TRANSFER","Transfert interne","Transfert"],
 ];
 
 /* ================= CATÉGORISATION ================= */
+/* Spécificité d'une règle = sa RARETÉ dans l'historique : INTISSAR (11 tx) bat E-TRANSFER (30 tx).
+   À égalité, le mot-clé le plus long gagne. Une règle toute neuve (fréquence 0) est la plus spécifique. */
+function calcFreqRegles(){
+  S.freq = {};
+  for (const r of S.regles){
+    const mot = r.mot.toUpperCase();
+    S.freq[r.id] = S.tx.reduce((n,t)=>n + (t.desc.toUpperCase().includes(mot)?1:0), 0);
+  }
+}
 function categoriser(desc, typeAuto){
   const u = desc.toUpperCase();
+  let meilleur = null, fMeilleur = Infinity;
   for (const r of S.regles){
-    if (u.includes(r.mot.toUpperCase()))
-      return { cat: r.cat, type: r.typeForce || typeAuto };
+    if (!u.includes(r.mot.toUpperCase())) continue;
+    const f = (S.freq && S.freq[r.id] !== undefined) ? S.freq[r.id] : 0;
+    if (!meilleur || f < fMeilleur || (f === fMeilleur && r.mot.length > meilleur.mot.length)){
+      meilleur = r; fMeilleur = f;
+    }
   }
-  return { cat: "Non catégorisé", type: typeAuto };
+  return meilleur ? { cat: meilleur.cat, type: meilleur.typeForce || typeAuto }
+                  : { cat: "Non catégorisé", type: typeAuto };
 }
 function recategoriserTout(){
+  calcFreqRegles();
   for (const t of S.tx){
     if (t.manuel) continue;                       /* choix manuel de l'utilisateur : intouchable */
     const c = categoriser(t.desc, t.typeAuto);
@@ -87,9 +115,15 @@ function recategoriserTout(){
 const months = () => [...new Set(S.tx.map(t=>t.mois))].sort();
 const txM = m => S.tx.filter(t=>t.mois===m);
 const remb = m => txM(m).filter(t=>t.type==="Remboursement").reduce((a,t)=>a+t.montant,0);
+const epInv = m => txM(m).filter(t=>t.type==="Épargne").reduce((a,t)=>a+t.montant,0);
 const dep = m => txM(m).filter(t=>t.type==="Dépense").reduce((a,t)=>a+t.montant,0) - remb(m);   /* net des remboursements */
 const rev = m => txM(m).filter(t=>t.type==="Revenu").reduce((a,t)=>a+t.montant,0);              /* revenus réels seulement */
 const flux = m => rev(m)-dep(m);
+/* versions "tendance" : hors transactions marquées Exceptionnel (achat d'auto, etc.) */
+const depT = m => txM(m).filter(t=>t.type==="Dépense" && !t.exceptionnel).reduce((a,t)=>a+t.montant,0) - remb(m);
+const fluxT = m => rev(m)-depT(m);
+const depCatT = (m,c) => txM(m).filter(t=>t.type==="Dépense"&&t.cat===c&&!t.exceptionnel).reduce((a,t)=>a+t.montant,0)
+                       - txM(m).filter(t=>t.type==="Remboursement"&&t.cat===c).reduce((a,t)=>a+t.montant,0);
 const depCat = (m,c) => txM(m).filter(t=>t.type==="Dépense"&&t.cat===c).reduce((a,t)=>a+t.montant,0)
                       - txM(m).filter(t=>t.type==="Remboursement"&&t.cat===c).reduce((a,t)=>a+t.montant,0);
 const cats = () => [...new Set(S.tx.filter(t=>t.type==="Dépense").map(t=>t.cat))];
@@ -104,13 +138,22 @@ function deltaHTML(c, inverse){
 }
 const ALIAS = [[/LYFT/,"Lyft"],[/UBER(?! EATS)/,"Uber"],[/UBER EATS/,"Uber Eats"],[/METRO\b/,"Metro"],
   [/TIM HORTONS/,"Tim Hortons"],[/SHOPPERS|SDM\b/,"Shoppers Drug Mart"],[/DR\.? MELVIN LEE|DENTIST/,"Dentiste (Dr Lee)"],
-  [/MASSINE|Y\.I\.G/,"Massine's Independent"],[/E-TRANSFER/,"Virements Interac"],[/TAPTAP/,"Taptap Send"],
+  [/MASSINE|Y\.I\.G/,"Massine's Independent"],[/TAPTAP/,"Taptap Send"],
   [/ATM/,"Retraits guichet"],[/SERVICE CHARGE|OVERDRAFT/,"Frais CIBC"],[/MEMBERSHIP FEE/,"Frais AMEX"],
   [/AMZN|AMAZON/,"Amazon"],[/WINNERS/,"Winners"],[/ROGERS/,"Rogers"],[/PRESTO/,"Presto"],[/TEMU/,"Temu"],
   [/LA BRIOCHE/,"La Brioche"],[/KETTLEMANS/,"Kettlemans Bagel"],[/ROCK'N DELI/,"Rock'N Deli"],[/DOLLARAMA/,"Dollarama"],
   [/BIRDANDBE/,"Bird&Be"],[/YOUTH SERVICES|^PAY\b/,"Youth Services Bureau"]];
 function marchand(d){
-  const u = d.toUpperCase();
+  let u = d.toUpperCase();
+  /* e-transferts : montrer VERS QUI / DE QUI */
+  if (u.includes("E-TRANSFER")){
+    const annule = u.includes("RECLAIM");
+    const nom = u.replace(/E-TRANSFER/,"").replace(/RECLAIM/,"").replace(/[\d#]/g,"").replace(/\s+/g," ").trim();
+    return "E-Transfert" + (nom ? " · " + nom.charAt(0) + nom.slice(1).toLowerCase() : "") + (annule ? " (annulé)" : "");
+  }
+  /* préfixes des relevés débit qui masquent le vrai commerçant */
+  u = u.replace(/^(VISA DEBIT )?RETAIL PURCHASE[\s\d]*/,"").replace(/^PREAUTHORIZED DEBIT /,"")
+       .replace(/^INTERNET BILL PAY [\d\s]*/,"").replace(/^WITHDRAWAL /,"").replace(/^DEPOSIT /,"");
   for (const [re,n] of ALIAS) if (re.test(u)) return n;
   let s = u.replace(/\b(OTTAWA|GATINEAU|TORONTO|MONTREAL|VANCOUVER|VICTORIA|KANATA|NEPEAN)\b/g,"")
            .replace(/\b(ON|QC|BC)\b/g,"").replace(/#?\d[\d\-.\/]*/g,"").replace(/\*+/g," ").replace(/\s{2,}/g," ").trim();
@@ -130,7 +173,7 @@ function marchands(){
 /* ================= SCORE / INSIGHTS / PROJECTIONS ================= */
 function score(m){
   const r = rev(m), taux = r>0 ? flux(m)/r : 0;
-  const so = soldeOf(m), deps = months().map(dep);
+  const so = soldeOf(m), deps = months().map(depT);
   const p1 = Math.min(30, Math.max(0, taux/0.20*30));
   const p2 = so && so.actifs>0 ? Math.min(25, Math.max(0,(1-so.passifs/so.actifs)*25)) : 0;
   const p3 = deps.length>=2 ? 15*(1-Math.min(1, std(deps)/(avg(deps)||1))) : 15;
@@ -152,7 +195,7 @@ function verdict(m){
 const streak = serie => { let n=0; for(let i=serie.length-1;i>0;i--){ if(serie[i]>serie[i-1]) n++; else break; } return n; };
 function insights(m){
   const out = [], ms = months();
-  out.push(`Rythme annuel de consommation projeté : <b>${fmt$.format(avg(ms.map(dep))*12)}</b>.`);
+  out.push(`Rythme annuel de consommation projeté : <b>${fmt$.format(avg(ms.map(depT))*12)}</b> (hors exceptionnels).`);
   if (ms.length>=2){
     const r = rev(m), taux = r>0?flux(m)/r:0;
     const hist = avg(ms.filter(x=>x!==m).map(x=>{const rr=rev(x); return rr>0?flux(x)/rr:0;}));
@@ -186,7 +229,7 @@ function apparierTransferts(){
   let n = 0;
   for (const tr of S.tx.filter(t=>t.type==="Transfert")){
     for (const t of S.tx){
-      if (t.type==="Transfert" || t.type==="Remboursement" || t.manuel || utilises.has(t.id)) continue;
+      if (t.type!=="Dépense" && t.type!=="Revenu" || t.manuel || utilises.has(t.id)) continue;
       if (t.source === tr.source) continue;
       if (Math.abs(t.montant - tr.montant) > 0.01) continue;
       if (Math.abs(new Date(t.date) - new Date(tr.date)) / 86400000 > 5) continue;
@@ -204,13 +247,13 @@ const transferts = m => txM(m).filter(t=>t.type==="Transfert");
 function classerRapide(ids, idx=0){
   if (idx >= ids.length){ closeSheet(); render(); toast("Tout est classé ✓"); return; }
   const t = S.tx.find(x=>x.id===ids[idx]); if(!t){ classerRapide(ids, idx+1); return; }
-  const dispo = [...new Set([...Object.keys(EMOJI).filter(c=>!["Non catégorisé","Paiement carte","Transfert interne"].includes(c)), ...cats()])].sort();
+  const dispo = catNames().filter(c=>!["Paiement carte","Transfert interne"].includes(c));
   const mot = marchand(t.desc).toUpperCase().split(" ").slice(0,2).join(" ");
   sheet(`
     <div class="small muted">${idx+1} / ${ids.length}</div>
     <h2 style="margin-top:4px">${marchand(t.desc)}</h2>
     <p class="small muted">${t.desc} · ${t.date} · ${fmt$2.format(t.montant)} (${t.typeAuto})</p>
-    <div class="chip-grid">${dispo.map(c=>`<button class="chip" data-c="${c}">${EMOJI[c]||""} ${c}</button>`).join("")}</div>
+    <div class="chip-grid">${dispo.map(c=>`<button class="chip" data-c="${c}">${emo(c)} ${c}</button>`).join("")}</div>
     <label>Ou créez une catégorie</label><input id="qc-new" placeholder="ex. Maison et entretien">
     <label class="row" style="margin-top:14px"><input type="checkbox" id="qc-rule" checked style="width:auto; margin:0">
       <span class="small">Mémoriser : toujours classer « <b>${mot}</b> » ainsi</span></label>
@@ -241,7 +284,7 @@ function faitsSaillants(m){
   const hist = ms.filter(x=>x<m).slice(-6);
   if (!hist.length) return out;
   for (const c of cats()){
-    const cur = depCat(m,c), ref = avg(hist.map(x=>depCat(x,c)));
+    const cur = depCat(m,c), ref = avg(hist.map(x=>depCatT(x,c)));
     if (ref===0 && cur===0) continue;
     const d = cur-ref, p = ref>0 ? d/ref : 1;
     if (Math.abs(d) >= 25 && Math.abs(p) >= .25)
@@ -315,6 +358,7 @@ function rMonth(){
   const anCour = ms.filter(x=>x.startsWith(m.slice(0,4)));
   const trs = transferts(m), trTot = trs.reduce((a,t)=>a+t.montant,0);
   const rb = remb(m), rembs = txM(m).filter(t=>t.type==="Remboursement");
+  const ep = epInv(m);
   const aClasser = txM(m).filter(t=>t.cat==="Non catégorisé" && t.type!=="Transfert");
   const fs = faitsSaillants(m);
 
@@ -341,15 +385,19 @@ function rMonth(){
     <h2>Comparaisons — dépenses</h2>
     <div class="card">
       <div class="cmp"><span>vs mois précédent</span>${deltaHTML(pm?compare(d,dep(pm)):null,true)}</div>
-      <div class="cmp"><span>vs moyenne 6 derniers mois</span>${deltaHTML(i6.length?compare(d,avg(i6.map(dep))):null,true)}</div>
+      <div class="cmp"><span>vs moyenne 6 derniers mois</span>${deltaHTML(i6.length?compare(d,avg(i6.map(depT))):null,true)}</div>
       <div class="cmp"><span>vs ${moisLabel(an)}</span>${deltaHTML(ms.includes(an)?compare(d,dep(an)):null,true)}</div>
-      <div class="cmp"><span>vs moyenne ${m.slice(0,4)}</span>${deltaHTML(anCour.length>1?compare(d,avg(anCour.map(dep))):null,true)}</div>
+      <div class="cmp"><span>vs moyenne ${m.slice(0,4)}</span>${deltaHTML(anCour.length>1?compare(d,avg(anCour.map(depT))):null,true)}</div>
     </div>
 
     ${fs.length?`<h2>À surveiller</h2><div class="card"><ul class="feed">${fs.map(x=>`<li>${x.d>0?"🔺":"🔻"} ${x.txt}</li>`).join("")}</ul></div>`:""}
 
     <h2>Dépenses par catégorie</h2>
     <div class="card" id="cat-tree"></div>
+
+    ${ep>0?`<div class="card row">
+      <div class="d"><b>📈 Épargne investie</b><div class="small muted">Virements vers CELI / REER / courtage — de l'épargne, pas une dépense</div></div>
+      <div class="sp"></div><div class="m pos">${fmt$.format(ep)}</div></div>`:""}
 
     ${rembs.length?`<div class="card row" id="rb-row" style="cursor:pointer">
       <div class="d"><b>Dépenses partagées — remboursements</b><div class="small muted">${rembs.length} reçus, déduits des catégories qu'ils compensent</div></div>
@@ -384,7 +432,7 @@ function rMonth(){
   $("cat-tree").innerHTML = catsTriees.map(([c,v],i)=>`
     <div class="cat-row" data-i="${i}" style="padding:10px 0; border-bottom:1px solid var(--border); cursor:pointer">
       <div class="row">
-        <div class="ic" style="width:34px;height:34px;min-width:34px;border-radius:10px;background:var(--card2);display:grid;place-items:center">${EMOJI[c]||"❔"}</div>
+        <div class="ic" style="width:34px;height:34px;min-width:34px;border-radius:10px;background:var(--card2);display:grid;place-items:center">${emo(c)}</div>
         <div class="d" style="flex:1"><b style="font-size:.92rem">${c}</b>
           <div style="height:5px;border-radius:3px;background:var(--card2);margin-top:5px"><div style="height:5px;border-radius:3px;background:var(--pos);width:${Math.max(0,Math.round(v.total/maxCat*100))}%"></div></div>
         </div>
@@ -433,9 +481,9 @@ function rMonth(){
       if (!vis.length) return "";
       return `<div class="day-h">${+dd.slice(8)} ${moisLabel(m)}</div>` + vis.map(t=>`
         <div class="tx" data-id="${t.id}">
-          <div class="ic">${EMOJI[t.cat]||"❔"}</div>
-          <div class="d"><b>${marchand(t.desc)}</b><span>${t.cat}${t.type==="Revenu"?" · Revenu":(t.type==="Remboursement"?" · Remboursement 🤝":"")}</span></div>
-          <div class="m ${t.type==="Revenu"?"pos":(t.type==="Remboursement"?"remb":"")}">${t.type!=="Dépense"?"+":""}${fmt$2.format(t.montant)}</div>
+          <div class="ic">${emo(t.cat)}</div>
+          <div class="d"><b>${marchand(t.desc)}</b><span>${t.cat}${t.type==="Revenu"?" · Revenu":(t.type==="Remboursement"?" · Remboursement 🤝":(t.type==="Épargne"?" · Épargne investie 📈":(t.exceptionnel?" · Exceptionnel ✦":"")))}</span></div>
+          <div class="m ${t.type==="Revenu"?"pos":(t.type==="Remboursement"||t.type==="Épargne"?"remb":"")}">${t.type!=="Dépense"?"+":""}${fmt$2.format(t.montant)}</div>
         </div>`).join("");
     }).join("") || vide("Aucun résultat.");
     document.querySelectorAll("#tx-list .tx").forEach(el=>el.onclick=()=>ficheTx(el.dataset.id));
@@ -446,14 +494,16 @@ function rMonth(){
 
 function ficheTx(id){
   const t = S.tx.find(x=>x.id===id); if(!t) return;
-  const toutes = [...new Set([...Object.keys(EMOJI), ...cats()])].filter(c=>c!=="Non catégorisé").sort();
+  const toutes = catNames();
   sheet(`
     <h2 style="margin-top:0">${marchand(t.desc)}</h2>
     <p class="small muted">${t.desc}<br>${t.date} · ${t.source} · ${fmt$2.format(t.montant)}</p>
     <label>Catégorie</label>
     <select id="f-cat">${toutes.map(c=>`<option ${c===t.cat?"selected":""}>${c}</option>`).join("")}<option ${t.cat==="Non catégorisé"?"selected":""}>Non catégorisé</option></select>
     <label>Type <span class="muted">(Remboursement = argent reçu qui réduit une dépense partagée, ex. la part du loyer de votre conjointe — déduit de la catégorie choisie, jamais compté comme revenu)</span></label>
-    <select id="f-type">${["Dépense","Revenu","Transfert","Remboursement"].map(x=>`<option ${x===t.type?"selected":""}>${x}</option>`).join("")}</select>
+    <select id="f-type">${["Dépense","Revenu","Transfert","Remboursement","Épargne"].map(x=>`<option ${x===t.type?"selected":""}>${x}</option>`).join("")}</select>
+    <label class="row" style="margin-top:14px"><input type="checkbox" id="f-exc" ${t.exceptionnel?"checked":""} style="width:auto; margin:0">
+      <span class="small">Exceptionnel <span class="muted">(gros achat ponctuel — compté ce mois-ci mais exclu des moyennes, tendances et projections)</span></span></label>
     <button class="btn" id="f-save">Enregistrer</button>
     <button class="btn sec" id="f-cancel">Annuler</button>`);
   $("f-cancel").onclick = closeSheet;
@@ -461,7 +511,7 @@ function ficheTx(id){
     const cat = $("f-cat").value, type = $("f-type").value;
     const change = cat !== t.cat || type !== t.type;
     const typeForcePropose = (type === t.typeAuto) ? null : type;
-    t.cat = cat; t.type = type; t.manuel = true;
+    t.cat = cat; t.type = type; t.manuel = true; t.exceptionnel = $("f-exc").checked;
     await DB.put("tx", t);
     closeSheet(); render();
     if (change){
@@ -492,13 +542,14 @@ function rYear(){
   const an = S.mois.slice(0,4);
   const msAn = ms.filter(x=>x.startsWith(an));
   const fluxes = ms.map(flux), deps = ms.map(dep);
+  const depsT = ms.map(depT), fluxesT = ms.map(fluxT);
   const cumDep = msAn.map(dep).reduce((a,v)=>a+v,0);
   const cumRev = msAn.map(rev).reduce((a,v)=>a+v,0);
   const best = ms[fluxes.indexOf(Math.max(...fluxes))], worst = ms[fluxes.indexOf(Math.min(...fluxes))];
   const grosse = S.tx.filter(t=>t.type==="Dépense").sort((a,b)=>b.montant-a.montant)[0];
   const restants = 12 - +S.mois.slice(5,7);
-  const moitie1 = msAn.slice(0, Math.ceil(msAn.length/2)).map(dep);
-  const moitie2 = msAn.slice(Math.ceil(msAn.length/2)).map(dep);
+  const moitie1 = msAn.slice(0, Math.ceil(msAn.length/2)).map(depT);
+  const moitie2 = msAn.slice(Math.ceil(msAn.length/2)).map(depT);
   const tendance = msAn.length>=4 ? (avg(moitie2)>avg(moitie1)*1.05 ? "🔺 en hausse" : (avg(moitie2)<avg(moitie1)*0.95 ? "🔻 en baisse" : "→ stable")) : null;
   b.innerHTML = `
     <h2>Cumul ${an}</h2>
@@ -518,14 +569,14 @@ function rYear(){
       <div class="badge"><span>Meilleur mois</span><b>${moisLabel(best)} · ${fmt$.format(Math.max(...fluxes))}</b></div>
       <div class="badge"><span>Pire mois</span><b>${moisLabel(worst)} · ${fmt$.format(Math.min(...fluxes))}</b></div>
       <div class="badge"><span>Plus forte dépense</span><b>${grosse?marchand(grosse.desc)+" · "+fmt$2.format(grosse.montant):"—"}</b></div>
-      <div class="badge"><span>Mois atypiques</span><b>${(deps.length>=3?ms.filter((x,i)=>deps[i]>avg(deps)+1.5*std(deps)):[]).map(moisCourt).join(", ")||"aucun"}</b></div>
+      <div class="badge"><span>Mois atypiques</span><b>${(depsT.length>=3?ms.filter((x,i)=>depsT[i]>avg(depsT)+1.5*std(depsT)):[]).map(moisCourt).join(", ")||"aucun"}</b></div>
     </div>
     <h2>Valeur nette & dette</h2>
     <div class="card">${S.soldes.length?`<div class="chart-box"><canvas id="ch-vn"></canvas></div>`:`<div class="empty small">Saisissez vos soldes mensuels (Plus → Patrimoine) pour suivre valeur nette et dette.</div>`}</div>
     <h2>Projections fin ${an}</h2>
     <div class="grid2">
-      <div class="card"><div class="kpi-label">Dépenses fin ${an}</div><div class="kpi-value">${fmt$.format(cumDep+avg(deps)*restants)}</div></div>
-      <div class="card"><div class="kpi-label">Épargne fin ${an}</div><div class="kpi-value">${fmt$.format((cumRev-cumDep)+avg(fluxes)*restants)}</div></div>
+      <div class="card"><div class="kpi-label">Dépenses fin ${an}</div><div class="kpi-value">${fmt$.format(cumDep+avg(depsT)*restants)}</div></div>
+      <div class="card"><div class="kpi-label">Épargne fin ${an}</div><div class="kpi-value">${fmt$.format((cumRev-cumDep)+avg(fluxesT)*restants)}</div></div>
       <div class="card"><div class="kpi-label">Valeur nette +12 mois</div><div class="kpi-value">${S.soldes.length?fmt$.format(linProj(S.soldes.map(s=>s.vn),12)):"—"}</div></div>
       <div class="card"><div class="kpi-label">Dette +12 mois</div><div class="kpi-value">${S.soldes.length?fmt$.format(Math.max(0,linProj(S.soldes.map(s=>s.passifs),12))):"—"}</div></div>
     </div>
@@ -572,6 +623,49 @@ function rMerch(){
       <p class="small muted">${x.n} visites · total ${fmt$2.format(x.total)} · panier moyen ${fmt$2.format(x.moy)}</p>
       <ul class="feed">${months().map(mm=>`<li class="row"><span>${moisLabel(mm)}</span><span class="sp"></span><b>${fmt$2.format(x.byMonth[mm]||0)}</b></li>`).join("")}</ul>
       <button class="btn sec" onclick="closeSheet()">Fermer</button>`);
+  });
+}
+
+function gererCategories(){
+  sheet(`<h2 style="margin-top:0">Mes catégories</h2>
+    <p class="small muted">Touchez pour renommer, changer l'émoji ou supprimer. Les renommages se propagent à tout l'historique et aux règles.</p>
+    <div class="feed">${S.cats.slice().sort((a,b)=>a.n.localeCompare(b.n)).map((c,i)=>`
+      <li class="row" data-n="${c.n}" style="cursor:pointer"><span>${c.e} <b>${c.n}</b></span><span class="sp"></span><span class="muted">›</span></li>`).join("")}</div>
+    <label>Nouvelle catégorie</label>
+    <div class="row"><input id="cat-new-e" value="📁" style="width:64px; text-align:center"><input id="cat-new-n" placeholder="ex. Voyages"></div>
+    <button class="btn" id="cat-add">Ajouter</button>
+    <button class="btn sec" onclick="closeSheet()">Fermer</button>`);
+  $("cat-add").onclick = async () => {
+    const n = $("cat-new-n").value.trim(); if (!n) return;
+    if (!S.cats.find(x=>x.n===n)) S.cats.push({n, e:$("cat-new-e").value.trim()||"📁"});
+    await sauverCats(); gererCategories(); toast("Catégorie ajoutée.");
+  };
+  document.querySelectorAll("#sheet-body .feed li").forEach(li=>li.onclick=()=>{
+    const c = S.cats.find(x=>x.n===li.dataset.n);
+    const usage = S.tx.filter(t=>t.cat===c.n).length;
+    sheet(`<h2 style="margin-top:0">Modifier « ${c.n} »</h2>
+      <p class="small muted">${usage} transaction(s) dans cette catégorie.</p>
+      <label>Émoji</label><input id="ce-e" value="${c.e}" style="width:80px; text-align:center">
+      <label>Nom</label><input id="ce-n" value="${c.n}">
+      <button class="btn" id="ce-save">Enregistrer</button>
+      <button class="btn sec" id="ce-del" style="color:var(--neg)">Supprimer${usage?" (les transactions redeviendront « Non catégorisé »)":""}</button>
+      <button class="btn sec" onclick="closeSheet()">Annuler</button>`);
+    $("ce-save").onclick = async () => {
+      const nn = $("ce-n").value.trim() || c.n;
+      if (nn !== c.n){
+        for (const t of S.tx) if (t.cat===c.n){ t.cat=nn; await DB.put("tx",t); }
+        for (const r of S.regles) if (r.cat===c.n){ r.cat=nn; await DB.put("regles",r); }
+      }
+      c.n = nn; c.e = $("ce-e").value.trim() || c.e;
+      await sauverCats(); closeSheet(); render(); toast("Catégorie mise à jour.");
+    };
+    $("ce-del").onclick = async () => {
+      for (const t of S.tx) if (t.cat===c.n){ t.cat="Non catégorisé"; await DB.put("tx",t); }
+      for (const r of S.regles.filter(r=>r.cat===c.n)) await DB.del("regles", r.id);
+      S.regles = await DB.all("regles");
+      S.cats = S.cats.filter(x=>x!==c);
+      await sauverCats(); closeSheet(); render(); toast("Catégorie supprimée.");
+    };
   });
 }
 
@@ -632,7 +726,7 @@ async function importerPDF(files){
     <p class="small" style="margin-top:8px"><b>${nouveaux.length}</b> nouvelles transactions · ${fmt$2.format(depN)} de dépenses
     ${doublons?`· <span class="muted">${doublons} doublons ignorés</span>`:""}</p>
     <div style="max-height:32vh; overflow-y:auto; margin-top:8px">${nouveaux.slice(0,60).map(t=>`
-      <div class="tx"><div class="ic">${EMOJI[t.cat]||"❔"}</div>
+      <div class="tx"><div class="ic">${emo(t.cat)}</div>
       <div class="d"><b>${marchand(t.desc)}</b><span>${t.date} · ${t.cat}</span></div>
       <div class="m">${fmt$2.format(t.montant)}</div></div>`).join("")}</div>
     <button class="btn" id="imp-ok">Confirmer l'import</button>
@@ -641,6 +735,7 @@ async function importerPDF(files){
   $("imp-ok").onclick = async () => {
     for (const t of nouveaux) await DB.put("tx", t);
     S.tx = await DB.all("tx");
+    calcFreqRegles();
     const nAp = apparierTransferts();
     closeSheet(); go("today");
     if (nAp) toast(nAp + " paiement(s) de carte apparié(s) et exclu(s) des dépenses.");
@@ -724,6 +819,26 @@ async function chargerEtat(){
     for (const [mot,cat,typeForce] of REGLES_DEFAUT) await DB.put("regles", {mot, cat, typeForce:typeForce||null});
     S.regles = await DB.all("regles");
   }
+  /* catégories personnalisables : amorçage puis stockage */
+  const meta = await DB.all("meta");
+  const mc = meta.find(x=>x.k==="cats");
+  if (mc) S.cats = mc.v;
+  else {
+    S.cats = Object.entries(EMOJI).map(([n,e])=>({n,e}));
+    for (const [n,e] of [["Véhicule","🚙"],["Épargne investie","📈"],["Remboursement de dettes","🧾"],["Maison et entretien","🛠️"]])
+      if (!S.cats.find(x=>x.n===n)) S.cats.push({n,e});
+    await sauverCats();
+  }
+  calcFreqRegles();
+  /* migration v4 : nouvelles règles par défaut + recatégorisation (corrige l'historique) */
+  if (!meta.find(x=>x.k==="migV4")){
+    const exist = new Set(S.regles.map(r=>r.mot.toUpperCase()));
+    for (const [mot,cat,typeForce] of REGLES_DEFAUT)
+      if (!exist.has(mot.toUpperCase())) await DB.put("regles", {mot, cat, typeForce:typeForce||null});
+    S.regles = await DB.all("regles");
+    if (S.tx.length) await recategoriserTout();
+    await DB.put("meta", {k:"migV4", v:1});
+  }
 }
 window.closeSheet = closeSheet;
 (async function init(){
@@ -748,12 +863,13 @@ window.closeSheet = closeSheet;
     document.documentElement.dataset.theme = t;
     DB.put("meta",{k:"theme",v:t}); render();
   };
+  $("btn-cats").onclick = gererCategories;
   $("btn-add-rule").onclick = () => {
     sheet(`<h2 style="margin-top:0">Nouvelle règle</h2>
       <label>Mot-clé (contenu dans la description)</label><input id="nr-mot" placeholder="ex. STARBUCKS">
       <label>Catégorie</label><input id="nr-cat" placeholder="ex. Restaurants">
       <label>Type <span class="muted">(Auto = selon le sens de la transaction)</span></label>
-      <select id="nr-type"><option value="">Auto</option><option>Dépense</option><option>Revenu</option><option>Transfert</option><option>Remboursement</option></select>
+      <select id="nr-type"><option value="">Auto</option><option>Dépense</option><option>Revenu</option><option>Transfert</option><option>Remboursement</option><option>Épargne</option></select>
       <button class="btn" id="nr-ok">Créer et appliquer</button>
       <button class="btn sec" onclick="closeSheet()">Annuler</button>`);
     $("nr-ok").onclick = async () => {

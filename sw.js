@@ -1,5 +1,5 @@
 /* Service worker Pilote — cache-first pour un fonctionnement 100 % hors ligne */
-const CACHE = "finora-v8";
+const CACHE = "finora-v9";
 const FICHIERS = [".", "index.html", "app.js", "parsers.js", "manifest.webmanifest",
   "vendor/pdf.min.js", "vendor/pdf.worker.min.js", "vendor/chart.umd.js", "vendor/xlsx.full.min.js",
   "icons/icon-192.png", "icons/icon-512.png", "icons/apple-touch-icon.png"];

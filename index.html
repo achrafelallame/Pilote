@@ -24,13 +24,12 @@
   --shadow:0 12px 32px rgba(0,0,0,.40); --shadow-hero:0 18px 44px rgba(29,78,216,.45);
 }
 *{box-sizing:border-box; margin:0; -webkit-tap-highlight-color:transparent}
-html,body{height:100%}
+html{height:100%} body{min-height:100%}
 body{background:var(--bg); color:var(--text);
   font-family:-apple-system, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
-  font-variant-numeric:tabular-nums; line-height:1.45; overscroll-behavior:none;
-  padding-bottom:calc(118px + env(safe-area-inset-bottom));}
+  font-variant-numeric:tabular-nums; line-height:1.45; overscroll-behavior:none;}
 @media (prefers-reduced-motion: reduce){ *{animation:none!important; transition:none!important} }
-main{max-width:640px; margin:0 auto; padding:calc(10px + env(safe-area-inset-top)) 16px 20px}
+main{max-width:640px; margin:0 auto; padding:calc(10px + env(safe-area-inset-top)) 16px calc(150px + env(safe-area-inset-bottom))}
 .screen{display:none} .screen.on{display:block; animation:pop .28s ease}
 @keyframes pop{from{opacity:0; transform:translateY(6px)} to{opacity:1}}
 h1{font-size:1.55rem; font-weight:800; letter-spacing:-.5px; padding:12px 0 6px}

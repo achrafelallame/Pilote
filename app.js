@@ -980,7 +980,7 @@ async function restaurer(file){
     for (const r of data.regles||[]) await DB.put("regles", r);
     for (const s of data.soldes||[]) await DB.put("soldes", s);
     /* une sauvegarde ancienne doit recevoir les mises à jour de données, même déjà faites ici */
-    await DB.del("meta","migV5"); await DB.del("meta","migV6"); await DB.del("meta","migV7");
+    await DB.del("meta","migV5"); await DB.del("meta","migV6"); await DB.del("meta","migV7"); await DB.del("meta","migV8");
     await chargerEtat();
     apparierTransferts();
     go("today");
@@ -1294,6 +1294,7 @@ async function chargerEtat(){
   if (S.tx.length) await migrationV5();
   if (S.tx.length) await migrationV6();
   await migrationV7();
+  await migrationV8();
   await majSoldes();
 }
 /* v6 : retraits du compte épargne reconnus côté chèque ; catégories du compte épargne */
@@ -1323,6 +1324,18 @@ async function migrationV7(){
   for (const t of S.tx) if (t.apparie && !t.manuel) delete t.apparie;   /* ré-apparié au démarrage avec la règle corrigée */
   if (S.tx.length) await recategoriserTout();
   await DB.put("meta", {k:"migV7", v:1});
+}
+/* v8 : l'assurance Square One couvre uniquement la voiture → Auto (sous-catégorie Assurance) */
+async function migrationV8(){
+  const meta = await DB.all("meta");
+  if (meta.find(x=>x.k==="migV8")) return;
+  let trouvee = false;
+  for (const r of S.regles) if (r.mot.toUpperCase().includes("SQUARE ONE")){ r.cat = "Auto"; r.typeForce = null; await DB.put("regles", r); trouvee = true; }
+  if (!trouvee) await DB.put("regles", {mot:"SQUARE ONE", cat:"Auto", typeForce:null});
+  S.regles = await DB.all("regles");
+  for (const t of S.tx) if (/SQUARE ONE/i.test(t.desc) && t.type==="Dépense"){ t.cat = "Auto"; await DB.put("tx", t); }
+  if (S.tx.length) await recategoriserTout();
+  await DB.put("meta", {k:"migV8", v:1});
 }
 window.closeSheet = closeSheet;
 (async function init(){

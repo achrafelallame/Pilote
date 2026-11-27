@@ -39,7 +39,7 @@ const DB = { d:null,
 /* ================= ÉTAT ================= */
 const S = { tx:[], regles:[], soldes:[], mois:null, ecran:"today", charts:{}, cats:[] };
 const ESSENTIEL = ["Épicerie","Logement","Transport","Télécom","Santé","Frais bancaires","Frais de carte","Assurances"];
-const DISCRET = ["Restaurants","Magasinage","Abonnements","Divertissement","Voyages"];
+const DISCRET = ["Restaurants","Magasinage","Abonnements","Divertissement","Voyages","Soins personnels"];
 const EMOJI = {"Épicerie":"🛒","Restaurants":"🍽️","Transport":"🚗","Télécom":"📱","Abonnements":"🔁","Santé":"🩺",
   "Magasinage":"🛍️","Logement":"🏠","Frais bancaires":"🏦","Frais de carte":"💳","Salaire":"💼","Virements reçus":"⬇️",
   "Virements Interac":"↔️","Virements internationaux":"🌍","Retraits":"💵","Paiement carte":"✔️","Transfert interne":"🔄","Non catégorisé":"❔"};
@@ -77,6 +77,25 @@ const REGLES_DEFAUT = [
   ["AMERICAN EXPRESS","Paiement carte","Transfert"],["PAYMENT RECEIVED","Paiement carte","Transfert"],
   ["PAYMENT THANK YOU","Paiement carte","Transfert"],["INTERNET TRANSFER","Transfert interne","Transfert"],
   ["FROM ACCOUNT","Retrait d'épargne","Transfert"],
+];
+
+/* v7 : règles tirées des dépenses réelles (restos, magasins, loisirs, soins) */
+const REGLES_V7 = [
+  ["SALAIRE VILLE DE GATINEAU","Salaire","Revenu"],
+  ["BOBINO","Restaurants"],["TAJINE","Restaurants"],["TAVERN","Restaurants"],["RED LOBSTER","Restaurants"],
+  ["SUBWAY","Restaurants"],["SHAWARMA","Restaurants"],["ROCK N DELI","Restaurants"],["MOCA LOCA","Restaurants"],
+  ["PRETZEL","Restaurants"],["CRÈME GLACÉE","Restaurants"],["TIEMBANH","Restaurants"],["BAGEL","Restaurants"],
+  ["PIZZA","Restaurants"],["SUSHI","Restaurants"],["BURGER","Restaurants"],["BAKERY","Restaurants"],["BOULANG","Restaurants"],
+  ["ADONIS","Épicerie"],
+  ["UNIQLO","Magasinage"],["ALDO","Magasinage"],["MARSHALLS","Magasinage"],["HOMESENSE","Magasinage"],
+  ["CALVIN KLEIN","Magasinage"],["SPORT CHEK","Magasinage"],["SPORTCHEK","Magasinage"],["ADIDAS","Magasinage"],
+  ["DECATHLON","Magasinage"],["NIKE","Magasinage"],["APPLE STORE","Magasinage"],
+  ["EYEMAXX","Santé"],["OPTICAL","Santé"],["OPTIQUE","Santé"],["FERTILITY","Santé"],
+  ["DREAM LOTTERY","Divertissement"],["FEVER*","Divertissement"],["GOODREC","Divertissement"],["CINEPLEX","Divertissement"],
+  ["TICKETMASTER","Divertissement"],["EVENTBRITE","Divertissement"],
+  ["U-HAUL","Maison et entretien"],
+  ["AGENCE DE MOBILITE","Transport"],["BIXI","Transport"],
+  ["BARBER","Soins personnels"],["COIFF","Soins personnels"],
 ];
 
 /* ================= CATÉGORISATION ================= */
@@ -143,7 +162,7 @@ const ALIAS = [[/LYFT/,"Lyft"],[/UBER(?! EATS)/,"Uber"],[/UBER EATS/,"Uber Eats"
   [/ATM/,"Retraits guichet"],[/SERVICE CHARGE|OVERDRAFT/,"Frais CIBC"],[/MEMBERSHIP FEE/,"Frais AMEX"],
   [/AMZN|AMAZON/,"Amazon"],[/WINNERS/,"Winners"],[/ROGERS/,"Rogers"],[/PRESTO/,"Presto"],[/TEMU/,"Temu"],
   [/LA BRIOCHE/,"La Brioche"],[/KETTLEMANS/,"Kettlemans Bagel"],[/ROCK'N DELI/,"Rock'N Deli"],[/DOLLARAMA/,"Dollarama"],
-  [/BIRDANDBE/,"Bird&Be"],[/YOUTH SERVICES|^PAY\b/,"Youth Services Bureau"]];
+  [/BIRDANDBE/,"Bird&Be"],[/VILLE DE GATINEAU/,"Ville de Gatineau"],[/YOUTH SERVICES/,"Youth Services Bureau"]];
 function marchand(d){
   let u = d.toUpperCase();
   /* e-transferts : montrer VERS QUI / DE QUI */
@@ -154,7 +173,8 @@ function marchand(d){
   }
   /* préfixes des relevés débit qui masquent le vrai commerçant */
   u = u.replace(/^(VISA DEBIT )?RETAIL PURCHASE[\s\d]*/,"").replace(/^PREAUTHORIZED DEBIT /,"")
-       .replace(/^INTERNET BILL PAY [\d\s]*/,"").replace(/^WITHDRAWAL /,"").replace(/^DEPOSIT /,"");
+       .replace(/^INTERNET BILL PAY [\d\s]*/,"").replace(/^WITHDRAWAL /,"").replace(/^DEPOSIT /,"")
+       .replace(/^PAY (SALAIRE )?[\d\s]*/,"");
   for (const [re,n] of ALIAS) if (re.test(u)) return n;
   let s = u.replace(/\b(OTTAWA|GATINEAU|TORONTO|MONTREAL|VANCOUVER|VICTORIA|KANATA|NEPEAN)\b/g,"")
            .replace(/\b(ON|QC|BC)\b/g,"").replace(/#?\d[\d\-.\/]*/g,"").replace(/\*+/g," ").replace(/\s{2,}/g," ").trim();
@@ -232,6 +252,7 @@ function apparierTransferts(){
     for (const t of S.tx){
       if (t.type!=="Dépense" && t.type!=="Revenu" || t.manuel || utilises.has(t.id)) continue;
       if (t.source === tr.source) continue;
+      if (t.typeAuto === tr.typeAuto) continue;   /* un paiement a deux sens opposés : un achat du même montant n'est pas sa contrepartie */
       if (Math.abs(t.montant - tr.montant) > 0.01) continue;
       if (Math.abs(new Date(t.date) - new Date(tr.date)) / 86400000 > 5) continue;
       t.type = "Transfert"; t.cat = "Paiement carte"; t.apparie = true;
@@ -782,7 +803,7 @@ async function importerPDF(files){
       const r = Parseurs.parseStatement(await extraireapages(f));
       const cibc = r.source==="CIBC Débit" && !!r.compte;
       const source = cibc ? (comptes[r.compte] || (devinerEpargne(r) ? SOURCE_EPARGNE : "CIBC Débit")) : r.source;
-      lots.push({nom:f.name, r, source, bascule:cibc});
+      lots.push({nom:f.name, r, source, cibc, connu: cibc && !!comptes[r.compte]});
     } catch(e){ lots.push({nom:f.name, erreur:e.message}); }
   }
   statut.textContent = "";
@@ -808,12 +829,18 @@ function preparerImport(lots){
   }
   return {nouveaux, doublons};
 }
+/* La correction de compte n'apparaît qu'une fois par numéro de compte, et seulement s'il est nouveau. */
+function premierInconnu(lots, i){
+  const L = lots[i];
+  if (L.erreur || !L.cibc || L.connu) return false;
+  return lots.findIndex(M => !M.erreur && M.cibc && !M.connu && M.r.compte===L.r.compte) === i;
+}
 function apercuImport(lots){
   const {nouveaux, doublons} = preparerImport(lots);
   const nbSoldes = lots.filter(L=>!L.erreur && L.r.solde).length;
   const ligne = (L,i) => L.erreur ? `<li>${L.nom} : ⚠️ ${L.erreur}</li>`
     : `<li>${L.nom} → <b>${L.source}</b>${L.r.compte?` · compte ${L.r.compte}`:""} : ${L.n} nouvelles${L.r.solde?`<br><span class="small muted">Solde ${fmt$2.format(L.r.solde.montant)} au ${L.r.solde.date}</span>`:""}
-      ${L.bascule?`<br><button class="btn sec mini" data-bascule="${i}" style="margin-top:6px">C'est mon compte ${L.source===SOURCE_EPARGNE?"chèque":"épargne"}</button>`:""}</li>`;
+      ${premierInconnu(lots,i)?`<br><button class="btn sec mini" data-bascule="${i}" style="margin-top:6px">C'est mon compte ${L.source===SOURCE_EPARGNE?"chèque":"épargne"}</button>`:""}</li>`;
   const depN = nouveaux.filter(t=>t.type==="Dépense").reduce((a,t)=>a+t.montant,0);
   sheet(`<h2 style="margin-top:0">${nouveaux.length?"Aperçu de l'import":"Import terminé"}</h2>
     <ul class="feed">${lots.map(ligne).join("")}</ul>
@@ -824,11 +851,13 @@ function apercuImport(lots){
         <div class="d"><b>${marchand(t.desc)}</b><span>${t.date} · ${t.cat}</span></div>
         <div class="m">${fmt$2.format(t.montant)}</div></div>`).join("")}</div>`
       : `<p class="small muted">${doublons?doublons+" transactions déjà présentes ont été ignorées (anti-doublons).":"Aucune nouvelle transaction."}${nbSoldes?" Les soldes de ces relevés seront enregistrés.":""}</p>`}
+    <div class="sticky-act">
     ${nouveaux.length||nbSoldes ? `<button class="btn" id="imp-ok">${nouveaux.length?"Confirmer l'import":"Enregistrer les soldes"}</button>` : ""}
-    <button class="btn sec" id="imp-no">${nouveaux.length||nbSoldes?"Annuler":"Fermer"}</button>`);
+    <button class="btn sec" id="imp-no">${nouveaux.length||nbSoldes?"Annuler":"Fermer"}</button></div>`);
   document.querySelectorAll("#sheet-body [data-bascule]").forEach(b=>b.onclick=()=>{
     const L = lots[+b.dataset.bascule];
-    L.source = L.source===SOURCE_EPARGNE ? "CIBC Débit" : SOURCE_EPARGNE;
+    const nouvelle = L.source===SOURCE_EPARGNE ? "CIBC Débit" : SOURCE_EPARGNE;
+    for (const M of lots) if (M.cibc && M.r.compte===L.r.compte) M.source = nouvelle;   /* tout le compte d'un coup */
     apercuImport(lots);
   });
   $("imp-no").onclick = closeSheet;
@@ -838,7 +867,7 @@ async function finaliserImport(lots, nouveaux){
   const comptes = await comptesConnus();
   for (const L of lots){
     if (L.erreur) continue;
-    if (L.bascule) comptes[L.r.compte] = L.source;
+    if (L.cibc) comptes[L.r.compte] = L.source;
     await enregistrerSolde(L.source, L.r.solde);
   }
   await DB.put("meta", {k:"comptes", v:comptes});
@@ -951,7 +980,7 @@ async function restaurer(file){
     for (const r of data.regles||[]) await DB.put("regles", r);
     for (const s of data.soldes||[]) await DB.put("soldes", s);
     /* une sauvegarde ancienne doit recevoir les mises à jour de données, même déjà faites ici */
-    await DB.del("meta","migV5"); await DB.del("meta","migV6");
+    await DB.del("meta","migV5"); await DB.del("meta","migV6"); await DB.del("meta","migV7");
     await chargerEtat();
     apparierTransferts();
     go("today");
@@ -1264,6 +1293,7 @@ async function chargerEtat(){
   }
   if (S.tx.length) await migrationV5();
   if (S.tx.length) await migrationV6();
+  await migrationV7();
   await majSoldes();
 }
 /* v6 : retraits du compte épargne reconnus côté chèque ; catégories du compte épargne */
@@ -1278,6 +1308,21 @@ async function migrationV6(){
   await sauverCats();
   if (S.tx.length) await recategoriserTout();
   await DB.put("meta", {k:"migV6", v:1});
+}
+/* v7 : nouvelles règles + catégories Divertissement / Soins personnels, puis recatégorisation (sauf choix manuels) */
+async function migrationV7(){
+  const meta = await DB.all("meta");
+  if (meta.find(x=>x.k==="migV7")) return;
+  const exist = new Set(S.regles.map(r=>r.mot.toUpperCase()));
+  for (const [mot,cat,typeForce] of REGLES_V7)
+    if (!exist.has(mot.toUpperCase())) await DB.put("regles", {mot, cat, typeForce:typeForce||null});
+  S.regles = await DB.all("regles");
+  for (const [n,e] of [["Divertissement","🎟️"],["Soins personnels","💈"]])
+    if (!S.cats.find(c=>c.n===n)) S.cats.push({n,e});
+  await sauverCats();
+  for (const t of S.tx) if (t.apparie && !t.manuel) delete t.apparie;   /* ré-apparié au démarrage avec la règle corrigée */
+  if (S.tx.length) await recategoriserTout();
+  await DB.put("meta", {k:"migV7", v:1});
 }
 window.closeSheet = closeSheet;
 (async function init(){

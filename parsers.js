@@ -35,8 +35,14 @@ function periode(text){
     if (mo) dates.push({y:+m[3], m:mo, d:+m[2], k:+m[3]*10000+mo*100+ +m[2]});
   }
   if (!dates.length) return null;
-  dates.sort((a,b) => a.k - b.k);
-  return { debut: dates[0], fin: dates[dates.length-1] };
+  /* Robustesse : un relevé peut citer des dates anciennes (avis « en vigueur depuis le 1er août 2019 »,
+     « membre depuis »…). On ne garde que les dates proches de la date MÉDIANE du document. */
+  const jour = x => Date.UTC(x.y, x.m-1, x.d) / 86400000;
+  const tri = dates.slice().sort((a,b) => a.k - b.k);
+  const med = jour(tri[Math.floor(tri.length/2)]);
+  let proches = tri.filter(x => Math.abs(jour(x) - med) <= 200);
+  if (!proches.length) proches = tri;
+  return { debut: proches[0], fin: proches[proches.length-1] };
 }
 /* Année d'une transaction "Mmm d" selon la période (gère le chevauchement déc.→janv.) */
 function anneeDe(mois, per){

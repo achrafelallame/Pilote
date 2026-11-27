@@ -26,6 +26,16 @@ function toLines(page){
 }
 const allText = pages => pages.map(p => p.items.map(i => i.s).join(" ")).join(" ");
 
+
+/* Montant d'un solde : "$2,729.78", "-$12.00", "12.00 CR" (crédit = négatif pour une carte) */
+function montantSolde(txt){
+  const m = txt.match(/(-?)\s*\$?\s*(-?)([\d,]+\.\d{2})\s*(CR)?/i);
+  if (!m) return null;
+  const v = num(m[3]);
+  return (m[1]==="-" || m[2]==="-" || m[4]) ? -v : v;
+}
+const dateTexte = (mo, d, y) => { const n = MOIS[mo.toUpperCase().replace(".","")]; return n ? iso(+y, n, +d) : null; };
+
 /* Bornes du relevé : plus ancienne et plus récente date "Mmm d, yyyy" trouvées dans le texte */
 function periode(text){
   const re = /([A-Za-z]{3,9})\.?\s+(\d{1,2}),?\s+(\d{4})/g;
@@ -70,7 +80,20 @@ function parseAmex(pages){
         typeAuto: paiement ? "Transfert" : (montant < 0 ? "Revenu" : "Dépense") });
     }
   }
-  return { source: "AMEX", transactions: out };
+  /* Solde : « New Balance » à la « Closing Date » (2e date de la ligne sous l'en-tête) */
+  let solde = null;
+  for (const page of pages){
+    const lignes = toLines(page);
+    for (let i=0; i<lignes.length; i++){
+      if (!solde && /Closing Date/i.test(lignes[i].text) && lignes[i+1]){
+        const ds = [...lignes[i+1].text.matchAll(/([A-Za-z]{3,9})\.?\s+(\d{1,2}),\s+(\d{4})/g)];
+        if (ds.length) solde = { date: dateTexte(ds.at(-1)[1], ds.at(-1)[2], ds.at(-1)[3]) };
+      }
+      const nb = lignes[i].text.match(/New Balance\s*(-?\s*\$?\s*-?[\d,]+\.\d{2}\s*(CR)?)/i);
+      if (nb && solde && solde.montant == null) solde.montant = montantSolde(nb[1]);
+    }
+  }
+  return { source: "AMEX", transactions: out, solde: solde && solde.date && solde.montant != null ? solde : null };
 }
 
 /* ============ CIBC Mastercard ============ */
@@ -92,7 +115,20 @@ function parseCibcMC(pages){
         typeAuto: paiement ? "Transfert" : "Dépense" });
     }
   }
-  return { source: "CIBC Mastercard", transactions: out };
+  /* Solde : « Total balance » à la « Statement Date » (date sur la ligne suivante) */
+  let date = null, montant = null;
+  for (const page of pages){
+    const lignes = toLines(page);
+    for (let i=0; i<lignes.length; i++){
+      if (!date && /^Statement Date$/i.test(lignes[i].text) && lignes[i+1]){
+        const d = lignes[i+1].text.match(/([A-Za-z]{3,9})\.?\s+(\d{1,2}),\s+(\d{4})/);
+        if (d) date = dateTexte(d[1], d[2], d[3]);
+      }
+      const tb = lignes[i].text.match(/Total balance\s*=?\s*(-?\s*\$?\s*-?[\d,]+\.\d{2}\s*(CR)?)/i);
+      if (tb && montant == null) montant = montantSolde(tb[1]);
+    }
+  }
+  return { source: "CIBC Mastercard", transactions: out, solde: date && montant != null ? {date, montant} : null };
 }
 
 /* ============ CIBC débit (colonnes Retraits / Dépôts par coordonnée x) ============ */
@@ -150,7 +186,15 @@ function parseCibcDebit(pages){
       }
     }
   }
-  return { source: "CIBC Débit", transactions: out };
+  /* Numéro de compte (chèque ou épargne : même format de relevé) et solde de clôture */
+  const texte = allText(pages);
+  const num_ = texte.match(/Account number:?\s+(\d{2}-\d{4,6})/i);
+  let solde = null;
+  for (const page of pages) for (const l of toLines(page)){
+    const c = l.text.match(/Closing balance on ([A-Za-z]{3,9})\.? (\d{1,2}), (\d{4})\s*=?\s*(.*)$/i);
+    if (c && !solde){ const v = montantSolde(c[4]); if (v != null) solde = { date: dateTexte(c[1], c[2], c[3]), montant: v }; }
+  }
+  return { source: "CIBC Débit", transactions: out, compte: num_ ? num_[1] : null, solde };
 }
 
 /* ============ Détection automatique ============ */

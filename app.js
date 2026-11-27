@@ -76,6 +76,7 @@ const REGLES_DEFAUT = [
   ["CLUTCH","Véhicule",""],
   ["AMERICAN EXPRESS","Paiement carte","Transfert"],["PAYMENT RECEIVED","Paiement carte","Transfert"],
   ["PAYMENT THANK YOU","Paiement carte","Transfert"],["INTERNET TRANSFER","Transfert interne","Transfert"],
+  ["FROM ACCOUNT","Retrait d'épargne","Transfert"],
 ];
 
 /* ================= CATÉGORISATION ================= */
@@ -108,7 +109,7 @@ function recategoriserTout(){
     const c = categoriser(t.desc, t.typeAuto);
     t.cat = c.cat; t.type = c.type;
   }
-  return Promise.all(S.tx.map(t => DB.put("tx", t)));
+  return Promise.all(S.tx.map(t => DB.put("tx", t))).then(() => lierEpargne());
 }
 
 /* ================= AGRÉGATS ================= */
@@ -227,7 +228,7 @@ function linProj(ys, pas){
 function apparierTransferts(){
   const utilises = new Set();
   let n = 0;
-  for (const tr of S.tx.filter(t=>t.type==="Transfert")){
+  for (const tr of S.tx.filter(t=>t.type==="Transfert" && t.source!=="CIBC Épargne")){
     for (const t of S.tx){
       if (t.type!=="Dépense" && t.type!=="Revenu" || t.manuel || utilises.has(t.id)) continue;
       if (t.source === tr.source) continue;
@@ -339,14 +340,17 @@ function blocEpargne(m){
   const delta = (cur, prev) => prev==null ? "" : deltaHTML(compare(cur, prev));
   let html = `<div class="grid2">`;
   if (sEp){
-    html += tuile("🏦","kc-cyan","CELI", fmt$.format(sEp.celi), delta(sEp.celi, prec?.celi));
-    html += tuile("🌱","kc-blue","REER", fmt$.format(sEp.reer), delta(sEp.reer, prec?.reer));
-    html += tuile("💧","kc-amber","Épargne liquide", fmt$.format(sEp.liquide), delta(sEp.liquide, prec?.liquide));
+    html += tuile("💧","kc-amber","Compte épargne", fmt$.format(sEp.liquide), delta(sEp.liquide, prec?.liquide));
+    html += tuile("🏦","kc-cyan","Questrade (versé)", fmt$.format(sEp.celi), "CELI et CELIAPP, hors rendement");
+    if (sEp.reer) html += tuile("🌱","kc-blue","REER", fmt$.format(sEp.reer), delta(sEp.reer, prec?.reer));
     html += tuile("◆","kc-pink","Total épargne", fmt$.format(sEp.celi+sEp.reer+sEp.liquide),
       sEp.mois===m ? "" : `Soldes de ${moisLabel(sEp.mois)}`);
   }
-  if (investiAn > 0)
-    html += tuile("📈","kc-blue","Épargné en "+an, fmt$.format(investiAn), "Compte épargne et Questrade, détectés dans vos relevés");
+  if (investiAn > 0){
+    const retiresAn = S.tx.filter(t=>t.cat==="Retrait d'épargne" && t.mois<=m && t.mois.startsWith(an) && !(t.source===SOURCE_EPARGNE && t.lie))
+                          .reduce((a,t)=>a+t.montant,0);
+    html += tuile("📈","kc-blue","Épargné en "+an, fmt$.format(investiAn), retiresAn ? `dont ${fmt$.format(retiresAn)} retirés depuis · net ${fmt$.format(investiAn-retiresAn)}` : "Compte épargne et Questrade, détectés dans vos relevés");
+  }
   html += `</div><button class="btn sec" id="btn-ep-saisir">${sEp?"Mettre à jour mes soldes":"Saisir mes soldes"}</button>`;
   return html;
 }
@@ -755,62 +759,156 @@ async function extraireapages(file){
   }
   return pages;
 }
+/* Un relevé CIBC « Account Statement » peut être le compte chèque ou le compte épargne :
+   même format, seul le numéro de compte diffère. Le choix est mémorisé par numéro. */
+const SOURCE_EPARGNE = "CIBC Épargne";
+async function comptesConnus(){ const m=(await DB.all("meta")).find(x=>x.k==="comptes"); return m ? m.v : {}; }
+function devinerEpargne(r){
+  const courant = /RETAIL PURCHASE|VISA DEBIT|PREAUTHORIZED|^PAY |ATM|SERVICE CHARGE|E-TRANSFER|BILL PAY/i;
+  return !r.transactions.some(t=>courant.test(t.desc)) && r.transactions.some(t=>/INTEREST/i.test(t.desc));
+}
+async function enregistrerSolde(source, solde){
+  if (!solde || !solde.date) return;
+  const m = (await DB.all("meta")).find(x=>x.k==="releves"), v = m ? m.v : [];
+  const i = v.findIndex(x=>x.source===source && x.date===solde.date);
+  if (i>=0) v[i].montant = solde.montant; else v.push({source, date:solde.date, montant:solde.montant});
+  await DB.put("meta", {k:"releves", v});
+}
 async function importerPDF(files){
-  const statut = $("import-status");
-  let nouveaux = [], doublons = 0, resume = [];
-  const ids = new Set(S.tx.map(t=>t.id));
+  const statut = $("import-status"), comptes = await comptesConnus(), lots = [];
   for (const f of files){
     statut.textContent = "Lecture de " + f.name + "…";
     try {
       const r = Parseurs.parseStatement(await extraireapages(f));
-      let n = 0;
-      for (const t of r.transactions){
-        const id = `${t.date}|${t.desc}|${t.montant.toFixed(2)}|${r.source}`;
-        if (ids.has(id)){ doublons++; continue; }
-        ids.add(id);
-        const c = categoriser(t.desc, t.typeAuto);
-        nouveaux.push({id, date:t.date, desc:t.desc, montant:t.montant, typeAuto:t.typeAuto,
-          type:c.type, cat:c.cat, source:r.source, mois:t.date.slice(0,7), manuel:false});
-        n++;
-      }
-      resume.push(`${f.name} → ${r.source} : ${n} nouvelles`);
-    } catch(e){ resume.push(`${f.name} : ⚠️ ${e.message}`); }
+      const cibc = r.source==="CIBC Débit" && !!r.compte;
+      const source = cibc ? (comptes[r.compte] || (devinerEpargne(r) ? SOURCE_EPARGNE : "CIBC Débit")) : r.source;
+      lots.push({nom:f.name, r, source, bascule:cibc});
+    } catch(e){ lots.push({nom:f.name, erreur:e.message}); }
   }
   statut.textContent = "";
-  if (!nouveaux.length){
-    sheet(`<h2 style="margin-top:0">Import terminé</h2>
-      <ul class="feed">${resume.map(x=>`<li>${x}</li>`).join("")}</ul>
-      <p class="small muted">${doublons?doublons+" transactions déjà présentes ont été ignorées (anti-doublons).":"Aucune nouvelle transaction."}</p>
-      <button class="btn sec" onclick="closeSheet()">Fermer</button>`);
-    return;
+  apercuImport(lots);
+}
+function preparerImport(lots){
+  const ids = new Set(S.tx.map(t=>t.id)), nouveaux = [];
+  let doublons = 0;
+  for (const L of lots){
+    if (L.erreur) continue;
+    L.n = 0;
+    for (const t of L.r.transactions){
+      const id = `${t.date}|${t.desc}|${t.montant.toFixed(2)}|${L.source}`;
+      if (ids.has(id)){ doublons++; continue; }
+      ids.add(id);
+      let c = categoriser(t.desc, t.typeAuto);
+      if (L.source===SOURCE_EPARGNE) c = /INTEREST/i.test(t.desc) ? {cat:"Intérêts", type:"Revenu"}
+        : {cat: t.typeAuto==="Revenu" ? "Versement épargne" : "Retrait d'épargne", type:"Transfert"};
+      nouveaux.push({id, date:t.date, desc:t.desc, montant:t.montant, typeAuto:t.typeAuto,
+        type:c.type, cat:c.cat, source:L.source, mois:t.date.slice(0,7), manuel:false});
+      L.n++;
+    }
   }
+  return {nouveaux, doublons};
+}
+function apercuImport(lots){
+  const {nouveaux, doublons} = preparerImport(lots);
+  const nbSoldes = lots.filter(L=>!L.erreur && L.r.solde).length;
+  const ligne = (L,i) => L.erreur ? `<li>${L.nom} : ⚠️ ${L.erreur}</li>`
+    : `<li>${L.nom} → <b>${L.source}</b>${L.r.compte?` · compte ${L.r.compte}`:""} : ${L.n} nouvelles${L.r.solde?`<br><span class="small muted">Solde ${fmt$2.format(L.r.solde.montant)} au ${L.r.solde.date}</span>`:""}
+      ${L.bascule?`<br><button class="btn sec mini" data-bascule="${i}" style="margin-top:6px">C'est mon compte ${L.source===SOURCE_EPARGNE?"chèque":"épargne"}</button>`:""}</li>`;
   const depN = nouveaux.filter(t=>t.type==="Dépense").reduce((a,t)=>a+t.montant,0);
-  sheet(`<h2 style="margin-top:0">Aperçu de l'import</h2>
-    <ul class="feed">${resume.map(x=>`<li>${x}</li>`).join("")}</ul>
-    <p class="small" style="margin-top:8px"><b>${nouveaux.length}</b> nouvelles transactions · ${fmt$2.format(depN)} de dépenses
-    ${doublons?`· <span class="muted">${doublons} doublons ignorés</span>`:""}</p>
-    <div style="max-height:32vh; overflow-y:auto; margin-top:8px">${nouveaux.slice(0,60).map(t=>`
-      <div class="tx"><div class="ic">${emo(t.cat)}</div>
-      <div class="d"><b>${marchand(t.desc)}</b><span>${t.date} · ${t.cat}</span></div>
-      <div class="m">${fmt$2.format(t.montant)}</div></div>`).join("")}</div>
-    <button class="btn" id="imp-ok">Confirmer l'import</button>
-    <button class="btn sec" id="imp-no">Annuler</button>`);
+  sheet(`<h2 style="margin-top:0">${nouveaux.length?"Aperçu de l'import":"Import terminé"}</h2>
+    <ul class="feed">${lots.map(ligne).join("")}</ul>
+    ${nouveaux.length ? `<p class="small" style="margin-top:8px"><b>${nouveaux.length}</b> nouvelles transactions · ${fmt$2.format(depN)} de dépenses
+      ${doublons?`· <span class="muted">${doublons} doublons ignorés</span>`:""}</p>
+      <div style="max-height:32vh; overflow-y:auto; margin-top:8px">${nouveaux.slice(0,60).map(t=>`
+        <div class="tx"><div class="ic">${emo(t.cat)}</div>
+        <div class="d"><b>${marchand(t.desc)}</b><span>${t.date} · ${t.cat}</span></div>
+        <div class="m">${fmt$2.format(t.montant)}</div></div>`).join("")}</div>`
+      : `<p class="small muted">${doublons?doublons+" transactions déjà présentes ont été ignorées (anti-doublons).":"Aucune nouvelle transaction."}${nbSoldes?" Les soldes de ces relevés seront enregistrés.":""}</p>`}
+    ${nouveaux.length||nbSoldes ? `<button class="btn" id="imp-ok">${nouveaux.length?"Confirmer l'import":"Enregistrer les soldes"}</button>` : ""}
+    <button class="btn sec" id="imp-no">${nouveaux.length||nbSoldes?"Annuler":"Fermer"}</button>`);
+  document.querySelectorAll("#sheet-body [data-bascule]").forEach(b=>b.onclick=()=>{
+    const L = lots[+b.dataset.bascule];
+    L.source = L.source===SOURCE_EPARGNE ? "CIBC Débit" : SOURCE_EPARGNE;
+    apercuImport(lots);
+  });
   $("imp-no").onclick = closeSheet;
-  $("imp-ok").onclick = async () => {
-    for (const t of nouveaux) await DB.put("tx", t);
-    S.tx = await DB.all("tx");
-    await reparerDatesAmex();
-    calcFreqRegles();
-    const nAp = apparierTransferts();
-    closeSheet(); go("today");
-    if (nAp) toast(nAp + " paiement(s) de carte apparié(s) et exclu(s) des dépenses.");
-    toast(`${nouveaux.length} transactions importées.`);
-    setTimeout(()=>sheet(`<h2 style="margin-top:0">Sauvegarder maintenant ?</h2>
-      <p class="small muted">Réflexe recommandé après chaque import : enregistrez le fichier dans Fichiers / iCloud Drive. C'est votre coffre-fort.</p>
-      <button class="btn" id="b-oui">Sauvegarder (.json)</button>
-      <button class="btn sec" onclick="closeSheet()">Plus tard</button>`), 600);
-    setTimeout(()=>{ const b=$("b-oui"); if(b) b.onclick=()=>{ sauvegarde(); closeSheet(); }; }, 650);
-  };
+  const ok = $("imp-ok"); if (ok) ok.onclick = () => finaliserImport(lots, nouveaux);
+}
+async function finaliserImport(lots, nouveaux){
+  const comptes = await comptesConnus();
+  for (const L of lots){
+    if (L.erreur) continue;
+    if (L.bascule) comptes[L.r.compte] = L.source;
+    await enregistrerSolde(L.source, L.r.solde);
+  }
+  await DB.put("meta", {k:"comptes", v:comptes});
+  for (const t of nouveaux) await DB.put("tx", t);
+  S.tx = await DB.all("tx");
+  await reparerDatesAmex();
+  calcFreqRegles();
+  await lierEpargne();
+  const nAp = apparierTransferts();
+  await majSoldes();
+  closeSheet(); go("today");
+  if (nAp) toast(nAp + " paiement(s) de carte apparié(s) et exclu(s) des dépenses.");
+  toast(nouveaux.length ? `${nouveaux.length} transactions importées.` : "Soldes enregistrés.");
+  if (!nouveaux.length) return;
+  setTimeout(()=>sheet(`<h2 style="margin-top:0">Sauvegarder maintenant ?</h2>
+    <p class="small muted">Réflexe recommandé après chaque import : enregistrez le fichier dans Fichiers / iCloud Drive. C'est votre coffre-fort.</p>
+    <button class="btn" id="b-oui">Sauvegarder (.json)</button>
+    <button class="btn sec" onclick="closeSheet()">Plus tard</button>`), 600);
+  setTimeout(()=>{ const b=$("b-oui"); if(b) b.onclick=()=>{ sauvegarde(); closeSheet(); }; }, 650);
+}
+
+/* ===== Compte épargne : appariement des virements par numéro de référence =====
+   « INTERNET TRANSFER 000000230599 » porte le même numéro sur les deux relevés.
+   Dépôt à l'épargne → le retrait côté chèque devient de l'Épargne ; retrait de l'épargne → simple transfert. */
+async function lierEpargne(){
+  const ref = d => (d.match(/INTERNET TRANSFER (\d{6,})/i) || [])[1];
+  const cheque = {};
+  for (const t of S.tx) if (t.source!==SOURCE_EPARGNE){ const r = ref(t.desc); if (r) cheque[r] = t; }
+  for (const e of S.tx.filter(t=>t.source===SOURCE_EPARGNE)){
+    const c = cheque[ref(e.desc)];
+    if (!e.manuel){
+      if (/INTEREST/i.test(e.desc)){ e.type="Revenu"; e.cat="Intérêts"; }
+      else { e.type="Transfert"; e.cat = e.typeAuto==="Revenu" ? "Versement épargne" : "Retrait d'épargne"; }
+    }
+    e.lie = !!c;
+    await DB.put("tx", e);
+    if (!c || c.manuel) continue;
+    if (e.typeAuto==="Revenu"){ c.type="Épargne"; c.cat="Compte épargne"; } else { c.type="Transfert"; c.cat="Retrait d'épargne"; }
+    await DB.put("tx", c);
+  }
+}
+
+/* ===== Soldes lus dans les relevés =====
+   Chèque et épargne CIBC, AMEX, Mastercard : dernier solde connu de chaque compte à la fin du mois
+   (jusqu'à 62 jours d'ancienneté). Questrade : versements cumulés. Le reste (prêt auto) : saisie manuelle. */
+const CHAMP_SOLDE = {"CIBC Débit":"cheque", "CIBC Épargne":"liquide", "AMEX":"amex", "CIBC Mastercard":"carte2"};
+async function majSoldes(){
+  const manuels = await DB.all("soldes");
+  const rel = ((await DB.all("meta")).find(x=>x.k==="releves") || {v:[]}).v;
+  const mois = [...new Set([...months(), ...manuels.map(s=>s.mois)])].sort();
+  const out = [];
+  for (const m of mois){
+    const fin = new Date(Date.UTC(+m.slice(0,4), +m.slice(5,7), 0)).toISOString().slice(0,10);
+    const auto = {};
+    for (const [src, champ] of Object.entries(CHAMP_SOLDE)){
+      const r = rel.filter(x=>x.source===src && x.date<=fin).sort((a,b)=>a.date.localeCompare(b.date)).at(-1);
+      if (r && (new Date(fin)-new Date(r.date))/JOUR_MS <= 62) auto[champ] = r.montant;
+    }
+    const questrade = S.tx.filter(t=>t.type==="Épargne" && /QUESTRADE/i.test(t.desc) && t.date<=fin).reduce((a,t)=>a+t.montant,0);
+    const man = manuels.find(s=>s.mois===m);
+    if (!man && !Object.keys(auto).length) continue;
+    const o = Object.assign({mois:m, cheque:0, celi:0, reer:0, liquide:0, amex:0, carte2:0, pret:0, autres:0}, man||{}, auto);
+    if (questrade > 0) o.celi = questrade;
+    o.auto = Object.keys(auto);
+    o.actifs = (o.cheque||0) + o.liquide + o.celi + o.reer;
+    o.passifs = o.amex + o.carte2 + o.pret + o.autres;
+    o.vn = o.actifs - o.passifs;
+    out.push(o);
+  }
+  S.soldes = out;
 }
 
 /* ================= PATRIMOINE ================= */
@@ -819,6 +917,7 @@ function feuilleSoldes(){
   const s = soldeOf(mois) || {mois, celi:0, reer:0, liquide:0, amex:0, carte2:0, pret:0, autres:0};
   const champ = (id,lab,val)=>`<label>${lab}</label><input id="${id}" type="number" inputmode="decimal" step="0.01" value="${val||0}">`;
   sheet(`<h2 style="margin-top:0">Soldes — ${moisLabel(mois)}</h2>
+    <p class="small muted">Les soldes des comptes CIBC, de l'AMEX et de la Mastercard sont lus dans vos relevés, et Questrade correspond à vos versements cumulés. Saisissez seulement ce qui n'y figure pas, comme le solde du prêt auto.</p>
     ${champ("so-celi","CELI",s.celi)}${champ("so-reer","REER",s.reer)}${champ("so-liq","Épargne liquide (compte)",s.liquide)}
     ${champ("so-amex","Solde AMEX",s.amex)}${champ("so-c2","Solde autre carte",s.carte2)}
     ${champ("so-pret","Prêt auto",s.pret)}${champ("so-aut","Autres dettes",s.autres)}
@@ -826,13 +925,13 @@ function feuilleSoldes(){
     <button class="btn sec" onclick="closeSheet()">Annuler</button>`);
   $("so-save").onclick = async () => {
     const v = id => parseFloat($(id).value)||0;
-    const o = {mois, celi:v("so-celi"), reer:v("so-reer"), liquide:v("so-liq"),
+    const o = {mois, cheque:s.cheque||0, celi:v("so-celi"), reer:v("so-reer"), liquide:v("so-liq"),
       amex:v("so-amex"), carte2:v("so-c2"), pret:v("so-pret"), autres:v("so-aut")};
-    o.actifs = o.celi+o.reer+o.liquide;
+    o.actifs = o.cheque+o.celi+o.reer+o.liquide;
     o.passifs = o.amex+o.carte2+o.pret+o.autres;
     o.vn = o.actifs-o.passifs;
     await DB.put("soldes", o);
-    S.soldes = (await DB.all("soldes")).sort((a,b)=>a.mois.localeCompare(b.mois));
+    await majSoldes();
     closeSheet(); render(); toast("Soldes enregistrés — valeur nette : "+fmt$.format(o.vn));
   };
 }
@@ -851,6 +950,8 @@ async function restaurer(file){
     for (const t of data.tx) await DB.put("tx", t);
     for (const r of data.regles||[]) await DB.put("regles", r);
     for (const s of data.soldes||[]) await DB.put("soldes", s);
+    /* une sauvegarde ancienne doit recevoir les mises à jour de données, même déjà faites ici */
+    await DB.del("meta","migV5"); await DB.del("meta","migV6");
     await chargerEtat();
     apparierTransferts();
     go("today");
@@ -1003,10 +1104,11 @@ function aVerifier(ignorees){
   for (const src of [...new Set(S.tx.map(t=>t.source))]){
     const msSrc = new Set(S.tx.filter(t=>t.source===src).map(t=>t.mois));
     const liste = [...msSrc].sort();
-    for (const m of ms) if (m>liste[0] && m<liste.at(-1) && !msSrc.has(m))
-      out.push({cle:`rel:${src}:${m}`, titre:`Relevé manquant ? ${src}, ${moisLabel(m)}`,
-        texte:`Aucune transaction ${src} ce mois-là, alors que ce compte est utilisé avant et après.`,
-        actions:[["Importer un relevé","importer"],["C'est normal","ok"]]});
+    const manquants = ms.filter(m => m>liste[0] && m<liste.at(-1) && !msSrc.has(m));
+    if (manquants.length) out.push({cle:`rel:${src}:${manquants.join(",")}`,
+      titre:`Relevé${manquants.length>1?"s":""} manquant${manquants.length>1?"s":""} ? ${src}`,
+      texte:`Aucune transaction ${src} en ${manquants.map(moisLabel).join(", ")}, alors que ce compte est utilisé avant et après.`,
+      actions:[["Importer un relevé","importer"],["C'est normal","ok"]]});
   }
   /* 4. Remboursements plus grands que les dépenses de leur catégorie, sur 3 mois glissants
         (un loyer payé d'avance le mois précédent n'est pas une anomalie). Regroupés par commerçant. */
@@ -1136,7 +1238,6 @@ async function chargerEtat(){
   S.tx = await DB.all("tx");
   S.reparees = await reparerDatesAmex();
   S.regles = await DB.all("regles");
-  S.soldes = (await DB.all("soldes")).sort((a,b)=>a.mois.localeCompare(b.mois));
   if (!S.regles.length){
     for (const [mot,cat,typeForce] of REGLES_DEFAUT) await DB.put("regles", {mot, cat, typeForce:typeForce||null});
     S.regles = await DB.all("regles");
@@ -1162,6 +1263,21 @@ async function chargerEtat(){
     await DB.put("meta", {k:"migV4", v:1});
   }
   if (S.tx.length) await migrationV5();
+  if (S.tx.length) await migrationV6();
+  await majSoldes();
+}
+/* v6 : retraits du compte épargne reconnus côté chèque ; catégories du compte épargne */
+async function migrationV6(){
+  const meta = await DB.all("meta");
+  if (meta.find(x=>x.k==="migV6")) return;
+  if (!S.regles.some(r=>r.mot.toUpperCase()==="FROM ACCOUNT"))
+    await DB.put("regles", {mot:"FROM ACCOUNT", cat:"Retrait d'épargne", typeForce:"Transfert"});
+  S.regles = await DB.all("regles");
+  for (const [n,e] of [["Intérêts","💰"],["Versement épargne","🏦"],["Retrait d'épargne","↩️"],["Compte épargne","🏦"]])
+    if (!S.cats.find(c=>c.n===n)) S.cats.push({n,e});
+  await sauverCats();
+  if (S.tx.length) await recategoriserTout();
+  await DB.put("meta", {k:"migV6", v:1});
 }
 window.closeSheet = closeSheet;
 (async function init(){

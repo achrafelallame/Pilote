@@ -346,7 +346,7 @@ function blocEpargne(m){
       sEp.mois===m ? "" : `Soldes de ${moisLabel(sEp.mois)}`);
   }
   if (investiAn > 0)
-    html += tuile("📈","kc-blue","Investi en "+an, fmt$.format(investiAn), "Virements Questrade & cie détectés");
+    html += tuile("📈","kc-blue","Épargné en "+an, fmt$.format(investiAn), "Compte épargne et Questrade, détectés dans vos relevés");
   html += `</div><button class="btn sec" id="btn-ep-saisir">${sEp?"Mettre à jour mes soldes":"Saisir mes soldes"}</button>`;
   return html;
 }
@@ -374,6 +374,8 @@ function rToday(){
       <div class="card"><div class="kicon kc-amber">◆</div><div class="kpi-label">Valeur nette</div><div class="kpi-value">${so?fmt$.format(so.vn):"—"}</div>
         <div class="kpi-sub">${so?"":"À saisir dans Plus → Patrimoine"}</div></div>
     </div>
+    <div id="verif-bloc"></div>
+    <div id="reste-bloc"></div>
     <h2>Épargne & investissements</h2>
     <div id="epargne-bloc"></div>
 
@@ -381,6 +383,31 @@ function rToday(){
     <div class="card"><ul class="feed">${insights(m).map(x=>`<li>${x}</li>`).join("")}</ul></div>`;
   $("epargne-bloc").innerHTML = blocEpargne(m);
   const be = $("btn-ep-saisir"); if (be) be.onclick = feuilleSoldes;
+  blocsAsync();
+}
+/* cartes qui lisent des réglages enregistrés (À vérifier, reste à vivre) */
+async function blocsAsync(){
+  const items = aVerifier(await verifsIgnorees());
+  const vb = $("verif-bloc"); if (!vb) return;
+  vb.innerHTML = items.length ? `<div class="card row" id="verif-row" style="cursor:pointer; border-color:var(--gold); margin-top:12px">
+      <div class="kicon kc-amber" style="margin:0">!</div>
+      <div class="d" style="flex:1"><b>${items.length} élément${items.length>1?"s":""} à vérifier</b><div class="small muted">Pour que vos chiffres soient justes</div></div>
+      <div class="m" style="color:var(--gold)">›</div></div>` : "";
+  if (items.length) $("verif-row").onclick = feuilleVerifs;
+  const rv = calculResteAVivre(await chargesManuelles());
+  const rb = $("reste-bloc"); if (!rb || !rv) return;
+  const prochains = rv.fixes.filter(c=>c.r && c.r.prochaine >= new Date().toISOString().slice(0,10)).sort((a,b)=>a.r.prochaine.localeCompare(b.r.prochaine)).slice(0,4);
+  rb.innerHTML = `<h2>Reste à vivre</h2>
+    <div class="card" id="reste-card" style="cursor:pointer">
+      <div class="kpi-label">Après vos charges fixes</div>
+      <div class="kpi-value ${rv.reste>=0?"pos":"neg"}">${fmt$.format(rv.reste)}<span class="kpi-unit" style="font-size:.9rem; color:var(--muted)"> /mois</span></div>
+      <div class="cmp"><span>Revenus (${moisLabel(rv.ref)})</span><b>${fmt$.format(rv.revenu)}</b></div>
+      ${rv.contributions>0?`<div class="cmp"><span>Contributions reçues (moy. 3 mois)</span><b>+${fmt$.format(rv.contributions)}</b></div>`:""}
+      <div class="cmp"><span>Charges fixes (${rv.fixes.length})</span><b>−${fmt$.format(rv.totalFixes)}</b></div>
+      ${prochains.length?`<div class="small muted" style="margin-top:10px">Prochains prélèvements : ${prochains.map(c=>`${c.nom} ${c.r.prochaine.slice(8)}/${c.r.prochaine.slice(5,7)} (${fmt$.format(c.r.montant)})`).join(" · ")}</div>`:""}
+      <div class="small" style="margin-top:8px; color:var(--accent)">Voir et modifier les charges ›</div>
+    </div>`;
+  $("reste-card").onclick = feuilleCharges;
 }
 
 function rMonth(){
@@ -432,7 +459,7 @@ function rMonth(){
     <div class="card" id="cat-tree"></div>
 
     ${ep>0?`<div class="card row">
-      <div class="d"><b>📈 Épargne investie</b><div class="small muted">Virements vers CELI / REER / courtage — de l'épargne, pas une dépense</div></div>
+      <div class="d"><b>📈 Épargne investie</b><div class="small muted">Virements vers le compte épargne, CELI, CELIAPP, REER — de l'épargne, pas une dépense</div></div>
       <div class="sp"></div><div class="m pos">${fmt$.format(ep)}</div></div>`:""}
 
     ${rembs.length?`<div class="card row" id="rb-row" style="cursor:pointer">
@@ -453,7 +480,7 @@ function rMonth(){
   for (const t of txM(m).filter(t=>t.type==="Dépense")){
     (parCat[t.cat] ||= {total:0, march:{}});
     parCat[t.cat].total += t.montant;
-    const k = marchand(t.desc);
+    const k = t.cat==="Auto" ? sousAuto(t) : marchand(t.desc);
     parCat[t.cat].march[k] = (parCat[t.cat].march[k]||0) + t.montant;
   }
   /* remboursements : déduits de la catégorie qu'ils compensent, visibles dans le détail */
@@ -609,6 +636,7 @@ function rYear(){
     </div>
     <h2>Valeur nette & dette</h2>
     <div class="card">${S.soldes.length?`<div class="chart-box"><canvas id="ch-vn"></canvas></div>`:`<div class="empty small">Saisissez vos soldes mensuels (Plus → Patrimoine) pour suivre valeur nette et dette.</div>`}</div>
+    ${blocAuto()}
     <h2>Projections fin ${an}</h2>
     <div class="grid2">
       <div class="card"><div class="kpi-label">Dépenses fin ${an}</div><div class="kpi-value">${fmt$.format(cumDep+avg(depsT)*restants)}</div></div>
@@ -867,6 +895,242 @@ async function reparerDatesAmex(){
   return n;
 }
 
+/* ================= AUTO : sous-catégories ================= */
+const CATS_AUTO_ANCIENNES = ["Véhicule","Crédit Auto","GAS"];
+/* catégories où un paiement régulier est une vraie charge fixe (pas un café ni un coiffeur) */
+const CATS_FIXES = ["Logement","Télécom","Abonnements","Assurances","Auto","Frais de carte","Frais bancaires","Remboursement de dettes"];
+function sousAuto(t){
+  const u = t.desc.toUpperCase();
+  if (t.exceptionnel || /CLUTCH/.test(u)) return "Achat du véhicule";
+  if (/LOAN PAYMENT|PRET AUTO|PRÊT AUTO/.test(u)) return "Prêt";
+  if (/INSURANCE|ASSURANCE/.test(u)) return "Assurance";
+  if (/\bGAS\b|PETRO|ESSO|SHELL|ULTRAMAR|PIONEER|IRVING/.test(u)) return "Essence";
+  if (/PARK|PAYBYPHONE|INDIGO|MACEWEN|SKIDA|STATIONNEMENT/.test(u)) return "Stationnement";
+  if (/MTO|DRIVETEST|SAAQ|SERVICEONTARIO/.test(u)) return "Permis & immatriculation";
+  return "Entretien & autres";
+}
+
+/* Espace Auto (vue Année) : coût mensuel moyen hors achat, par sous-catégorie */
+function blocAuto(){
+  const autoTx = S.tx.filter(t=>t.type==="Dépense" && t.cat==="Auto");
+  if (!autoTx.length) return "";
+  const achat = autoTx.filter(t=>sousAuto(t)==="Achat du véhicule").reduce((a,t)=>a+t.montant,0);
+  const trois = moisComplets().slice(-3);
+  const courant = autoTx.filter(t=>trois.includes(t.mois) && sousAuto(t)!=="Achat du véhicule");
+  const parSous = {};
+  for (const t of courant) parSous[sousAuto(t)] = (parSous[sousAuto(t)]||0) + t.montant;
+  const n = trois.length || 1;
+  const total = courant.reduce((a,t)=>a+t.montant,0)/n;
+  return `<h2>Auto</h2>
+    <div class="card">
+      <div class="kpi-label">Coût moyen de la voiture (3 derniers mois, hors achat)</div>
+      <div class="kpi-value">${fmt$.format(total)}<span style="font-size:.9rem; color:var(--muted)"> /mois</span></div>
+      ${Object.entries(parSous).sort((a,b)=>b[1]-a[1]).map(([s,v])=>`<div class="cmp"><span>${s}</span><b>${fmt$.format(v/n)}/mois</b></div>`).join("")}
+      ${achat?`<div class="small muted" style="margin-top:10px">Achat du véhicule : ${fmt$.format(achat)} (exclu des moyennes)</div>`:""}
+    </div>`;
+}
+
+/* ================= CHARGES FIXES & RESTE À VIVRE ================= */
+const JOUR_MS = 86400000;
+const debutMoisCourant = () => new Date().toISOString().slice(0,7);
+const moisComplets = () => months().filter(m => m < debutMoisCourant());
+const mediane = a => { const s=a.slice().sort((x,y)=>x-y); return s.length ? s[Math.floor(s.length/2)] : 0; };
+/* Prélèvements récurrents : même commerçant, montant stable, à intervalle régulier. */
+function recurrents(){
+  const groupes = {};
+  for (const t of S.tx.filter(t=>t.type==="Dépense" && !t.exceptionnel)){
+    (groupes[marchand(t.desc)] ||= []).push(t);
+  }
+  const out = [];
+  for (const [nom, arr] of Object.entries(groupes)){
+    if (arr.length < 3) continue;
+    arr.sort((a,b)=>a.date.localeCompare(b.date));
+    const med = mediane(arr.map(t=>t.montant));
+    const stables = arr.filter(t => Math.abs(t.montant - med) <= Math.max(3, med*0.05));
+    if (stables.length < 3) continue;
+    const ints = [];
+    for (let i=1;i<stables.length;i++) ints.push((new Date(stables[i].date)-new Date(stables[i-1].date))/JOUR_MS);
+    const iv = mediane(ints);
+    if (iv < 6 || iv > 40) continue;
+    const reguliers = ints.filter(x => Math.abs(x-iv) <= 6).length;
+    if (reguliers < ints.length*0.6) continue;
+    const cat = stables.at(-1).cat;
+    if (!CATS_FIXES.includes(cat)) continue;            /* un café régulier n'est pas une charge fixe */
+    if (S.tx.some(t=>t.type==="Remboursement" && marchand(t.desc)===nom)) continue;   /* frais toujours remboursés */
+    const derniere = stables.at(-1).date, source = stables.at(-1).source;
+    out.push({ nom, cat, source, montant: med, intervalle: iv, mensuel: med*30.44/iv, derniere,
+      prochaine: new Date(new Date(derniere).getTime() + iv*JOUR_MS).toISOString().slice(0,10) });
+  }
+  return out.sort((a,b)=>b.mensuel-a.mensuel);
+}
+/* Une charge est « active » si elle est passée récemment, par rapport au DERNIER RELEVÉ importé
+   de son compte (et non à aujourd'hui : un relevé pas encore importé n'est pas un arrêt). */
+const finDonnees = src => S.tx.filter(t=>t.source===src).reduce((m,t)=>t.date>m?t.date:m, "");
+const joursDepuis = r => (new Date(finDonnees(r.source)) - new Date(r.derniere))/JOUR_MS;
+function estActive(r){ return joursDepuis(r) <= r.intervalle*1.5 + 7; }
+async function chargesManuelles(){ const m=(await DB.all("meta")).find(x=>x.k==="chargesMan"); return m ? m.v : []; }
+function calculResteAVivre(man){
+  const comp = moisComplets(), ref = comp.at(-1);
+  if (!ref) return null;
+  /* une charge saisie à la main remplace le prélèvement détecté du même nom (ex. loyer) */
+  const auto = recurrents().filter(estActive)
+    .filter(r => !man.some(c => c.nom.toUpperCase().includes(r.nom.toUpperCase().split(" ")[0])));
+  const fixes = [...man.map(c=>({nom:c.nom, mensuel:c.montant, manuel:true})), ...auto.map(r=>({nom:r.nom, mensuel:r.mensuel, r}))];
+  const totalFixes = fixes.reduce((a,c)=>a+c.mensuel,0);
+  const trois = comp.slice(-3);
+  const contributions = avg(trois.map(m => txM(m).filter(t=>t.type==="Remboursement" && t.cat!=="Frais bancaires").reduce((a,t)=>a+t.montant,0)));
+  const revenu = rev(ref);
+  return { ref, revenu, contributions, fixes, totalFixes, reste: revenu + contributions - totalFixes };
+}
+
+/* ================= À VÉRIFIER ================= */
+async function verifsIgnorees(){ const m=(await DB.all("meta")).find(x=>x.k==="verifOk"); return new Set(m ? m.v : []); }
+async function ignorerVerif(cle){ const s=await verifsIgnorees(); s.add(cle); await DB.put("meta",{k:"verifOk", v:[...s]}); }
+function aVerifier(ignorees){
+  const out = [], ms = months();
+  /* 1. Revenu qui n'est pas un salaire */
+  for (const t of S.tx.filter(t=>t.type==="Revenu" && t.cat!=="Salaire" && t.montant>=500))
+    out.push({cle:"rev:"+t.id, t, titre:`Revenu inhabituel : ${fmt$2.format(t.montant)}`,
+      texte:`${marchand(t.desc)} · ${t.date}. Si c'est de l'argent venu d'un autre de vos comptes, ce n'est pas un revenu.`,
+      actions:[["C'est un transfert","transfert"],["C'est bien un revenu","ok"]]});
+  /* 2. Grosse dépense ponctuelle non marquée exceptionnelle */
+  const recNoms = new Set(recurrents().map(r=>r.nom));
+  for (const t of S.tx.filter(t=>t.type==="Dépense" && !t.exceptionnel && t.montant>=1000 && t.cat!=="Logement" && !recNoms.has(marchand(t.desc))))
+    out.push({cle:"exc:"+t.id, t, titre:`Grosse dépense : ${fmt$2.format(t.montant)}`,
+      texte:`${marchand(t.desc)} · ${t.date} · ${t.cat}. Si c'est ponctuel, la marquer exceptionnelle évite de fausser vos moyennes.`,
+      actions:[["Marquer exceptionnelle","exceptionnel"],["Dépense normale","ok"]]});
+  /* 3. Mois sans aucune transaction pour un compte déjà utilisé avant et après */
+  for (const src of [...new Set(S.tx.map(t=>t.source))]){
+    const msSrc = new Set(S.tx.filter(t=>t.source===src).map(t=>t.mois));
+    const liste = [...msSrc].sort();
+    for (const m of ms) if (m>liste[0] && m<liste.at(-1) && !msSrc.has(m))
+      out.push({cle:`rel:${src}:${m}`, titre:`Relevé manquant ? ${src}, ${moisLabel(m)}`,
+        texte:`Aucune transaction ${src} ce mois-là, alors que ce compte est utilisé avant et après.`,
+        actions:[["Importer un relevé","importer"],["C'est normal","ok"]]});
+  }
+  /* 4. Remboursements plus grands que les dépenses de leur catégorie, sur 3 mois glissants
+        (un loyer payé d'avance le mois précédent n'est pas une anomalie). Regroupés par commerçant. */
+  const somme = (arr) => arr.reduce((a,t)=>a+t.montant,0);
+  const fenetre = (m, type, c) => { const i = ms.indexOf(m); return ms.slice(Math.max(0,i-1), i+2).flatMap(x=>txM(x)).filter(t=>t.type===type && t.cat===c); };
+  const signales = {};
+  for (const t of S.tx.filter(t=>t.type==="Remboursement")){
+    if (somme(fenetre(t.mois,"Remboursement",t.cat)) <= somme(fenetre(t.mois,"Dépense",t.cat)) + 0.01) continue;
+    (signales[marchand(t.desc)+"|"+t.cat] ||= []).push(t);
+  }
+  for (const arr of Object.values(signales)){
+    const t = arr[0], c = t.cat;
+    /* la dépense qu'il compense : même montant, à 3 jours près, dans une autre catégorie */
+    const cible = S.tx.find(d => d.type==="Dépense" && d.cat!==c && Math.abs(d.montant-t.montant)<0.01 && Math.abs(new Date(d.date)-new Date(t.date))<=3*JOUR_MS);
+    const n = arr.length;
+    out.push({cle:"remb:"+arr.map(x=>x.id).join(","), lot:arr, cible: cible?cible.cat:null,
+      titre:`Remboursement sans dépense : ${marchand(t.desc)}${n>1?` (${n} fois)`:` · ${fmt$2.format(t.montant)}`}`,
+      texte: cible
+        ? `${n>1?`Ces ${n} remboursements sont déduits`:"Ce remboursement est déduit"} de « ${c} », mais la dépense qu'il annule est classée « ${cible.cat} ». Ils ne se compensent donc jamais.`
+        : `${t.date} · déduit de « ${c} », qui n'a pas assez de dépenses autour de cette date. Choisissez la catégorie qu'il compense.`,
+      actions: cible ? [[`Déplacer vers « ${cible.cat} »`,"deplacer"],["C'est correct","ok"]] : [["Modifier","fiche"],["C'est correct","ok"]]});
+  }
+  /* 5. Achat important classé Auto sans être clairement lié à la voiture */
+  for (const t of S.tx.filter(t=>t.type==="Dépense" && t.cat==="Auto" && !t.exceptionnel && t.montant>=200 && sousAuto(t)==="Entretien & autres"))
+    out.push({cle:"auto:"+t.id, t, titre:`Classé Auto : ${fmt$2.format(t.montant)}`,
+      texte:`${marchand(t.desc)} · ${t.date}. Est-ce vraiment pour la voiture ? Sinon, il gonfle le coût de votre auto.`,
+      actions:[["Changer de catégorie","fiche"],["Oui, pour la voiture","ok"]]});
+  /* 6. Charge fixe qui ne passe plus, alors que des relevés plus récents du même compte sont importés */
+  for (const r of recurrents().filter(r=>!estActive(r) && joursDepuis(r) < 150))
+    out.push({cle:`fin:${r.nom}:${r.derniere}`, titre:`${r.nom} : plus de prélèvement`,
+      texte:`Environ ${fmt$2.format(r.montant)} tous les ${Math.round(r.intervalle)} jours ; dernier passage le ${r.derniere}, alors que vos relevés ${r.source} vont jusqu'au ${finDonnees(r.source)}. Résilié ou changé de compte ?`,
+      actions:[["C'est normal","ok"]]});
+  return out.filter(x=>!ignorees.has(x.cle));
+}
+async function feuilleVerifs(){
+  const items = aVerifier(await verifsIgnorees());
+  if (!items.length){ closeSheet(); render(); toast("Tout est vérifié ✓"); return; }
+  sheet(`<h2 style="margin-top:0">À vérifier (${items.length})</h2>
+    <p class="small muted">Ces éléments peuvent fausser vos chiffres. Un toucher suffit ; votre choix est mémorisé.</p>
+    ${items.map((x,i)=>`<div class="card" style="box-shadow:none; margin:10px 0 0">
+      <b>${x.titre}</b><p class="small muted" style="margin:4px 0 10px">${x.texte}</p>
+      <div class="row" style="flex-wrap:wrap; gap:8px">${x.actions.map(([lab,act],j)=>`<button class="btn ${j?"sec ":""}mini" data-i="${i}" data-a="${act}">${lab}</button>`).join("")}</div>
+    </div>`).join("")}
+    <button class="btn sec" onclick="closeSheet()">Fermer</button>`);
+  document.querySelectorAll("#sheet-body [data-a]").forEach(b=>b.onclick=async()=>{
+    const x = items[+b.dataset.i], a = b.dataset.a, t = x.t;
+    if (a==="transfert"){ t.type="Transfert"; t.cat="Transfert interne"; t.manuel=true; await DB.put("tx",t); }
+    if (a==="exceptionnel"){ t.exceptionnel=true; t.manuel=true; await DB.put("tx",t); }
+    if (a==="importer"){ closeSheet(); go("more"); $("pdf-input").click(); return; }
+    if (a==="fiche"){ closeSheet(); ficheTx((t||x.lot[0]).id); return; }
+    if (a==="deplacer"){
+      for (const r of x.lot){ r.cat = x.cible; r.manuel = true; await DB.put("tx", r); }
+      /* la règle qui les classait suit, pour les prochains relevés */
+      const d0 = x.lot[0].desc.toUpperCase();
+      for (const rg of S.regles.filter(rg=>rg.typeForce==="Remboursement" && d0.includes(rg.mot.toUpperCase()))){ rg.cat = x.cible; await DB.put("regles", rg); }
+      S.regles = await DB.all("regles");
+    }
+    await ignorerVerif(x.cle);
+    S.tx = await DB.all("tx");
+    feuilleVerifs();
+  });
+}
+
+/* ================= CHARGES FIXES : écran ================= */
+async function feuilleCharges(){
+  const man = await chargesManuelles();
+  const rv = calculResteAVivre(man);
+  if (!rv){ toast("Il faut au moins un mois complet."); return; }
+  sheet(`<h2 style="margin-top:0">Charges fixes</h2>
+    <p class="small muted">Détectées automatiquement (montant stable, à intervalle régulier), plus celles que vous ajoutez. Montants ramenés au mois.</p>
+    <div class="feed">${rv.fixes.map((c,i)=>`<li class="row"><span>${c.nom}${c.r?`<br><span class="small muted">${fmt$2.format(c.r.montant)} tous les ${Math.round(c.r.intervalle)} j · prochain vers le ${c.r.prochaine}</span>`:`<br><span class="small muted">ajoutée par vous</span>`}</span>
+      <span class="sp"></span><b>${fmt$.format(c.mensuel)}</b>${c.manuel?` <button class="btn sec mini" data-del="${i}">✕</button>`:""}</li>`).join("")}</div>
+    <div class="row" style="margin-top:10px"><b>Total</b><span class="sp"></span><b>${fmt$.format(rv.totalFixes)}/mois</b></div>
+    <label>Ajouter une charge fixe (ex. loyer, garderie)</label>
+    <div class="row"><input id="cm-nom" placeholder="Nom"><input id="cm-mt" type="number" inputmode="decimal" placeholder="$ / mois" style="width:120px"></div>
+    <button class="btn" id="cm-add">Ajouter</button>
+    <button class="btn sec" onclick="closeSheet()">Fermer</button>`);
+  $("cm-add").onclick = async () => {
+    const nom = $("cm-nom").value.trim(), mt = parseFloat($("cm-mt").value);
+    if (!nom || !(mt>0)) return;
+    await DB.put("meta",{k:"chargesMan", v:[...man, {nom, montant:mt}]});
+    render(); feuilleCharges();
+  };
+  document.querySelectorAll("#sheet-body [data-del]").forEach(b=>b.onclick=async()=>{
+    const nom = rv.fixes[+b.dataset.del].nom;
+    await DB.put("meta",{k:"chargesMan", v:man.filter(c=>c.nom!==nom)});
+    render(); feuilleCharges();
+  });
+}
+
+/* ================= MIGRATION v5 =================
+   Compte épargne = épargne ; catégories auto regroupées sous « Auto » ;
+   achat de la voiture (juillet 2026) hors moyennes et hors revenus ; loyer en charge fixe. */
+async function migrationV5(){
+  const meta = await DB.all("meta");
+  if (meta.find(x=>x.k==="migV5")) return;
+  for (const t of S.tx){
+    const u = t.desc.toUpperCase(); let ch = false;
+    if (CATS_AUTO_ANCIENNES.includes(t.cat)){ t.cat = "Auto"; ch = true; }
+    if (t.cat === "Insurance"){ t.cat = "Assurances"; ch = true; }
+    if (/^WITHDRAWAL IBB BANK/.test(u) && Math.abs(t.montant-10000) < 0.01 && t.type==="Dépense"){ t.cat="Auto"; t.exceptionnel=true; t.manuel=true; ch=true; }
+    if (/^MEMO - TRANSFER IBB BANK/.test(u) && t.type==="Revenu"){ t.type="Transfert"; t.cat="Transfert interne"; t.manuel=true; ch=true; }
+    if (t.type==="Remboursement" && t.exceptionnel){ t.exceptionnel=false; ch=true; }
+    if (ch) await DB.put("tx", t);
+  }
+  for (const r of S.regles){
+    if (CATS_AUTO_ANCIENNES.includes(r.cat)){ r.cat="Auto"; await DB.put("regles", r); }
+    else if (r.cat==="Insurance"){ r.cat="Assurances"; await DB.put("regles", r); }
+  }
+  const exist = new Set(S.regles.map(r=>r.mot.toUpperCase()));
+  for (const [mot,cat,typeForce] of [["TO ACCOUNT","Compte épargne","Épargne"],["LOAN PAYMENT","Auto",""],
+      ["PAYBYPHONE","Auto",""],["PARKING","Auto",""],["CLUTCH","Auto",""],["DRIVETEST","Auto",""]])
+    if (!exist.has(mot)) await DB.put("regles", {mot, cat, typeForce:typeForce||null});
+  S.regles = await DB.all("regles");
+  S.cats = S.cats.filter(c=>!CATS_AUTO_ANCIENNES.includes(c.n) && c.n!=="Insurance");
+  for (const [n,e] of [["Auto","🚙"],["Assurances","🛡️"],["Compte épargne","🏦"]])
+    if (!S.cats.find(c=>c.n===n)) S.cats.push({n,e});
+  await sauverCats();
+  if (!meta.find(x=>x.k==="chargesMan")) await DB.put("meta",{k:"chargesMan", v:[{nom:"Loyer", montant:2495}]});
+  S.tx = await DB.all("tx");
+  await recategoriserTout();
+  await DB.put("meta",{k:"migV5", v:1});
+}
+
 /* ================= DÉMARRAGE ================= */
 async function chargerEtat(){
   S.tx = await DB.all("tx");
@@ -897,6 +1161,7 @@ async function chargerEtat(){
     if (S.tx.length) await recategoriserTout();
     await DB.put("meta", {k:"migV4", v:1});
   }
+  if (S.tx.length) await migrationV5();
 }
 window.closeSheet = closeSheet;
 (async function init(){

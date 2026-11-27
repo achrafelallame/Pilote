@@ -771,6 +771,7 @@ async function importerPDF(files){
   $("imp-ok").onclick = async () => {
     for (const t of nouveaux) await DB.put("tx", t);
     S.tx = await DB.all("tx");
+    await reparerDatesAmex();
     calcFreqRegles();
     const nAp = apparierTransferts();
     closeSheet(); go("today");
@@ -832,7 +833,7 @@ function exportCSV(){
   const lignes = [["Date","Description","Montant","Type","Catégorie","Source","Mois"]];
   for (const t of S.tx.slice().sort((a,b)=>a.date.localeCompare(b.date)))
     lignes.push([t.date, t.desc.replace(/"/g,"'"), t.montant.toFixed(2), t.type, t.cat, t.source, t.mois]);
-  download("Finora_Transactions.csv", "\ufeff"+lignes.map(l=>l.map(c=>`"${c}"`).join(";")).join("\n"), "text/csv");
+  download("Finora_Transactions.csv", "﻿"+lignes.map(l=>l.map(c=>`"${c}"`).join(";")).join("\n"), "text/csv");
 }
 function exportXLSX(){
   const wb = XLSX.utils.book_new();
@@ -846,9 +847,30 @@ function exportXLSX(){
   XLSX.writeFile(wb, "Finora_Export.xlsx");
 }
 
+/* ================= RÉPARATION DES DATES AMEX =================
+   La carte AMEX existe depuis mars 2026 : une transaction AMEX datée avant (ex. 2019, ancien bug
+   de lecture de l'année) est replacée en 2026. Si la même transaction existe déjà en 2026
+   (relevé réimporté), l'exemplaire mal daté est simplement supprimé. Sans effet si tout est correct. */
+const AMEX_OUVERTURE = "2026-03-01";
+async function reparerDatesAmex(){
+  const ids = new Set(S.tx.map(t=>t.id));
+  let n = 0;
+  for (const t of S.tx.filter(t=>t.source==="AMEX" && t.date < AMEX_OUVERTURE)){
+    const nd = "2026" + t.date.slice(4);
+    if (nd < AMEX_OUVERTURE) continue;
+    const nid = `${nd}|${t.desc}|${t.montant.toFixed(2)}|${t.source}`;
+    await DB.del("tx", t.id); ids.delete(t.id);
+    if (!ids.has(nid)){ t.id = nid; t.date = nd; t.mois = nd.slice(0,7); await DB.put("tx", t); ids.add(nid); }
+    n++;
+  }
+  if (n) S.tx = await DB.all("tx");
+  return n;
+}
+
 /* ================= DÉMARRAGE ================= */
 async function chargerEtat(){
   S.tx = await DB.all("tx");
+  S.reparees = await reparerDatesAmex();
   S.regles = await DB.all("regles");
   S.soldes = (await DB.all("soldes")).sort((a,b)=>a.mois.localeCompare(b.mois));
   if (!S.regles.length){
@@ -884,6 +906,7 @@ window.closeSheet = closeSheet;
   await DB.open();
   await chargerEtat();
   if (S.tx.length) apparierTransferts();   /* migration : appariement des données existantes */
+  if (S.reparees) setTimeout(()=>toast(`${S.reparees} transactions AMEX remises dans leur bon mois (2026).`), 800);
   document.querySelectorAll("nav button").forEach(b=>b.onclick=()=>go(b.dataset.s));
   document.querySelectorAll(".fold-h").forEach(b=>b.onclick=()=>{
     const el = $(b.dataset.fold); el.hidden = !el.hidden;
